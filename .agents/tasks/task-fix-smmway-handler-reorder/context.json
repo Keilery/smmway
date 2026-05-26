@@ -1,0 +1,16 @@
+{
+  "project_type": "FunPay Cardinal (FPC) plugin - single Python file plugin for SMM service reselling via smmway.ru API",
+  "language": "Python",
+  "build_system": "None (single-file FPC plugin, loaded by Cardinal at runtime)",
+  "test_framework": "None (no test infrastructure present)",
+  "build_command": "cd /projects/sandbox/smmway && python3 -c \"import py_compile; py_compile.compile('smmway_v1.3.11 (2).py', doraise=True)\"",
+  "test_command": "cd /projects/sandbox/smmway && python3 -c \"import ast; ast.parse(open('smmway_v1.3.11 (2).py').read()); print('OK')\"",
+  "verification_instructions": "1. Run py_compile to confirm no syntax errors. 2. Run ast.parse to confirm valid AST. 3. Grep the file to verify the reordering code now handles both dict and Handler-object formats.",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "No setup needed - single Python file plugin",
+  "environment_constraints": "No FPC runtime available - can only validate via AST/syntax checking. No pyTelegramBotAPI installed for import-level tests.",
+  "contribution_requirements": "Single file plugin, all code in one .py file",
+  "key_patterns": "pyTelegramBotAPI 4.x stores handlers as Handler objects (namedtuple-like) with attributes: .callback (the function), .filters (dict with 'func' key for filter lambdas). Older versions stored handlers as plain dicts: {'function': fn, 'filters': {'func': filter_fn}}. The reordering code must handle BOTH formats to be compatible across versions.",
+  "relevant_files": ["/projects/sandbox/smmway/smmway_v1.3.11 (2).py"],
+  "directory_structure": "Single file repository: smmway_v1.3.11 (2).py is the entire plugin, README.md is empty"
+}

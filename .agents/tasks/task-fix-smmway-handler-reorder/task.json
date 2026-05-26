@@ -1,0 +1,7 @@
+{
+  "task_id": "task-fix-smmway-handler-reorder",
+  "task_description": "Fix handler reordering code in the SMMWay FPC plugin so that callbacks (Настройки button) and commands (/smmway) work correctly. The reordering logic only handles dict-format handlers but pyTelegramBotAPI 4.x uses Handler objects with attributes.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001"],
+  "blocked_reason": null
+}
