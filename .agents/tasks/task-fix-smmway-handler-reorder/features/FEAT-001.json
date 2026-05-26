@@ -1,0 +1,25 @@
+{
+  "id": "FEAT-001",
+  "type": "fix",
+  "description": "Fix the handler reordering code in init_tg_menu() so that both callback_query_handlers and message_handlers are correctly moved to the front of their respective handler lists, regardless of whether pyTelegramBotAPI stores them as dicts or Handler objects. This fixes both bugs: (1) 'Настройки' button not working (callback not intercepted), and (2) /smmway command not responding.",
+  "status": "completed",
+  "steps": [
+    "In file '/projects/sandbox/smmway/smmway_v1.3.11 (2).py', locate the callback handler reordering block (lines ~2872-2889). Replace the dict-only access pattern with a helper that handles both formats. For dict-style: h.get('filters', {}).get('func'). For Handler objects: getattr(h, 'filters', None) then check if filters is a dict and get 'func', OR getattr(filters, 'func', None) if filters is an object.",
+    "In the same file, locate the message handler reordering block (lines ~2893-2908). Replace the dict-only access pattern h.get('function') with a helper that also checks getattr(h, 'callback', None) for Handler objects. The attribute for the handler function in pyTelegramBotAPI 4.x Handler objects is 'callback', not 'function'.",
+    "The fix should use a small helper function (or inline getattr chains) defined just before the reordering blocks. Pattern: def _get_filter(h): if isinstance(h, dict): return h.get('filters', {}).get('func'); filters = getattr(h, 'filters', None); if isinstance(filters, dict): return filters.get('func'); return getattr(filters, 'func', None). And: def _get_handler_fn(h): if isinstance(h, dict): return h.get('function'); return getattr(h, 'callback', None).",
+    "Run py_compile and ast.parse to verify no syntax errors after the fix."
+  ],
+  "acceptance_criteria": [
+    "The callback handler reordering code uses getattr() to access handler attributes, not just dict .get()",
+    "The message handler reordering code uses getattr() to access handler function, not just dict .get()",
+    "Both code blocks still have their try/except wrapper for safety",
+    "The file compiles without syntax errors (py_compile and ast.parse succeed)",
+    "The log messages remain informative (reporting how many handlers were moved)"
+  ],
+  "verification": [
+    "cd /projects/sandbox/smmway && python3 -c \"import py_compile; py_compile.compile('smmway_v1.3.11 (2).py', doraise=True)\"",
+    "cd /projects/sandbox/smmway && python3 -c \"import ast; ast.parse(open('smmway_v1.3.11 (2).py').read()); print('AST OK')\""
+  ],
+  "blocked_reason": null,
+  "findings": "Fix implemented successfully. Added _get_handler_filter() and _get_handler_fn() helpers that handle both dict-style handlers (pyTelegramBotAPI 3.x) and Handler objects (pyTelegramBotAPI 4.x). Verified with py_compile and ast.parse - no syntax errors."
+}
