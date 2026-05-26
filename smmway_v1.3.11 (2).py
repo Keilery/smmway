@@ -2869,12 +2869,28 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
     filter_settings = lambda c: c.data and c.data.startswith("47:") and UUID in c.data
     tg.cbq_handler(on_callback, filter_own)
     tg.cbq_handler(on_callback, filter_settings)
+    def _get_handler_filter(h):
+        """Extract filter function from a handler (dict or Handler object)."""
+        if isinstance(h, dict):
+            return h.get("filters", {}).get("func")
+        # pyTelegramBotAPI 4.x Handler object
+        filters = getattr(h, "filters", None)
+        if isinstance(filters, dict):
+            return filters.get("func")
+        return getattr(filters, "func", None) if filters else None
+
+    def _get_handler_fn(h):
+        """Extract handler callback function from a handler (dict or Handler object)."""
+        if isinstance(h, dict):
+            return h.get("function")
+        return getattr(h, "callback", None)
+
     try:
         my_filters = {id(filter_own), id(filter_settings)}
         own = []
         rest = []
         for h in bot.callback_query_handlers:
-            f = h.get("filters", {}).get("func") if isinstance(h, dict) else None
+            f = _get_handler_filter(h)
             if f is not None and id(f) in my_filters:
                 own.append(h)
             else:
@@ -2894,7 +2910,7 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
         my_mh = []
         rest_mh = []
         for h in bot.message_handlers:
-            fn = h.get("function") if isinstance(h, dict) else None
+            fn = _get_handler_fn(h)
             if fn is _cmd_smmway:
                 my_mh.append(h)
             else:
