@@ -1,0 +1,16 @@
+{
+  "project_type": "FunPay Cardinal (FPC) plugin - single Python file plugin for SMM service reselling via smmway.ru API",
+  "language": "Python",
+  "build_system": "None (single-file FPC plugin, loaded by Cardinal at runtime)",
+  "test_framework": "None (no test infrastructure present)",
+  "build_command": "python3 -c \"import py_compile; py_compile.compile('smmway_v1.3.11 (2).py', doraise=True)\"",
+  "test_command": "python3 -c \"import ast; ast.parse(open('smmway_v1.3.11 (2).py').read()); print('OK')\"",
+  "verification_instructions": "1. Run py_compile to confirm no syntax errors. 2. Run ast.parse to confirm valid AST. 3. Verify BIND_TO hooks are properly defined as lists.",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "No setup needed - single Python file plugin",
+  "environment_constraints": "No FPC runtime available - can only validate via AST/syntax checking",
+  "contribution_requirements": "Single file plugin, all code in one .py file",
+  "key_patterns": "FPC plugin conventions: BIND_TO_PRE_INIT=[func], BIND_TO_NEW_ORDER=[func], BIND_TO_NEW_MESSAGE=[func], BIND_TO_DELETE=[func] (all should be lists). COMMANDS dict maps command names to descriptions. init_tg_menu() registers Telegram bot handlers. CTX singleton for plugin state.",
+  "relevant_files": ["/projects/sandbox/smmway/smmway_v1.3.11 (2).py"],
+  "directory_structure": "Single file repository: smmway_v1.3.11 (2).py is the entire plugin, README.md is empty"
+}

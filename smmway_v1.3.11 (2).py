@@ -3750,4 +3750,4 @@ def on_delete(*args, **kwargs) -> None:
 BIND_TO_PRE_INIT = [init_plugin]
 BIND_TO_NEW_ORDER = [on_new_order]
 BIND_TO_NEW_MESSAGE = [on_new_message]
-BIND_TO_DELETE = on_delete
+BIND_TO_DELETE = [on_delete]
