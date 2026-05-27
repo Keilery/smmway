@@ -2559,8 +2559,8 @@ def main_menu_kb():
     )
     kb.add(B("🔔 Уведомления", callback_data=f"{CB}:notif"))
     kb.add(
-        B(("🟢" if s and s.cfg.get("auto_deactivate_enabled") else "🔴") + " Авто-деактивация",
-          callback_data=f"{CB}:toggle_autodeact"),
+        B(("🟢" if s and s.cfg.get("auto_replace_missing_service") else "🔴") + " Потеряшка",
+          callback_data=f"{CB}:toggle_replace"),
         B(("🟢" if s and s.cfg.get("auto_review_bonus_enabled", True) else "🔴") +
           f" Отзыв (+{int(s.cfg.get('auto_review_bonus_pct', 10) if s else 10)}%)",
           callback_data=f"{CB}:autoreview"),
@@ -2654,8 +2654,8 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
                 CTX.storage.save_config()
                 open_main(c)
                 return
-            if data == f"{CB}:toggle_autodeact":
-                CTX.storage.cfg["auto_deactivate_enabled"] = not CTX.storage.cfg.get("auto_deactivate_enabled", True)
+            if data == f"{CB}:toggle_replace":
+                CTX.storage.cfg["auto_replace_missing_service"] = not CTX.storage.cfg.get("auto_replace_missing_service", True)
                 CTX.storage.save_config()
                 open_main(c)
                 return
