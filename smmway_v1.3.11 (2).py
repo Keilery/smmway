@@ -2630,33 +2630,10 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
                 logger.exception("open_main: send_message failed")
 
     # /smmway command (+ алиасы для удобства)
-    # Регистрируем НАПРЯМУЮ через bot.message_handler, чтобы потом
-    # перенести в начало списка bot.message_handlers (см. ниже).
-    @bot.message_handler(commands=["smmway", "smm", "smmway_menu"])
     def _cmd_smmway(m):
         if hasattr(tg, "is_authorized_user") and not tg.is_authorized_user(m.from_user.id):
             return
         open_main(m)
-
-    # Регистрируем команду в BotFather-меню чтобы /smmway появлялась в
-    # автокомплите при наборе "/". scope=BotCommandScopeDefault — для всех
-    # пользователей бота. Команды от других плагинов/FPC мы НЕ перезаписываем —
-    # подмешиваем себя к существующему списку. Если бот не позволяет
-    # (старый api, либо нет прав) — спокойно игнорим.
-    try:
-        from telebot.types import BotCommand
-        try:
-            existing = list(bot.get_my_commands() or [])
-        except Exception:
-            existing = []
-        existing_names = {c.command for c in existing if hasattr(c, "command")}
-        new_cmds = list(existing)
-        if "smmway" not in existing_names:
-            new_cmds.append(BotCommand("smmway", "🪄 Меню плагина SMMWay"))
-        bot.set_my_commands(new_cmds)
-        logger.info("smmway: /smmway registered in BotFather menu (%d total)", len(new_cmds))
-    except Exception:
-        logger.warning("smmway: set_my_commands failed (не критично)", exc_info=True)
 
     # callback router
     def on_callback(c):
@@ -2851,61 +2828,6 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
             except Exception:
                 pass
 
-    # FPC builtin `default_cp.py` регистрирует `default_callback_answer`
-    # с фильтром `lambda c: True` — он ловит ЛЮБОЙ callback и показывает
-    # alert с переведённым c.data. pyTelegramBotAPI 4.16+ вызывает ТОЛЬКО
-    # первый совпавший handler (см. `_run_middlewares_and_handler`,
-    # `if not isinstance(result, ContinueHandling): break`), а builtin грузится
-    # раньше плагинов — на клик «Настройки» (callback `47:UUID:0`) первым
-    # срабатывал именно дефолтный «show c.data as alert», и наш handler
-    # никогда не вызывался.
-    #
-    # Регистрируем наши handlers через стандартный путь, чтобы остаться
-    # совместимыми с FPC (ловится exception и логируется), а затем
-    # ПЕРЕМЕЩАЕМ их в начало списка `bot.callback_query_handlers`. Это
-    # гарантирует что для smw:* и 47:UUID:* мы отвечаем ПЕРВЫМИ, а
-    # default_callback_answer ловит только то что не подошло никому.
-    filter_own = lambda c: c.data and c.data.startswith(f"{CB}:")
-    filter_settings = lambda c: c.data and c.data.startswith("47:") and UUID in c.data
-    tg.cbq_handler(on_callback, filter_own)
-    tg.cbq_handler(on_callback, filter_settings)
-    try:
-        my_filters = {id(filter_own), id(filter_settings)}
-        own = []
-        rest = []
-        for h in bot.callback_query_handlers:
-            f = h.get("filters", {}).get("func") if isinstance(h, dict) else None
-            if f is not None and id(f) in my_filters:
-                own.append(h)
-            else:
-                rest.append(h)
-        if own:
-            bot.callback_query_handlers = own + rest
-            logger.info("smmway: moved %d cbq handler(s) to front of %d total",
-                        len(own), len(bot.callback_query_handlers))
-        else:
-            logger.warning("smmway: could not find own cbq handlers to reorder")
-    except Exception:
-        logger.exception("smmway: failed to reorder cbq handlers")
-
-    # То же самое для /smmway: переносим наш message_handler в начало,
-    # чтобы он точно сработал раньше любого catch-all из других плагинов.
-    try:
-        my_mh = []
-        rest_mh = []
-        for h in bot.message_handlers:
-            fn = h.get("function") if isinstance(h, dict) else None
-            if fn is _cmd_smmway:
-                my_mh.append(h)
-            else:
-                rest_mh.append(h)
-        if my_mh:
-            bot.message_handlers = my_mh + rest_mh
-            logger.info("smmway: moved /smmway handler to front of %d msg handlers",
-                        len(bot.message_handlers))
-    except Exception:
-        logger.exception("smmway: failed to reorder msg handlers")
-
     # state-based message handlers (multi-step inputs)
     def _is_pending(m):
         with CTX.tg_state_lock:
@@ -2954,7 +2876,19 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
             bot.reply_to(m, f"Ошибка: {ex}")
             logger.exception("on_state_message failed")
 
-    tg.msg_handler(on_state_message, func=_is_pending)
+    # Register handlers using register_message_handler / register_callback_query_handler
+    # (DesslyHub pattern) instead of decorators + manual reordering.
+    tg.bot.register_message_handler(_cmd_smmway, commands=["smmway", "smm", "smmway_menu"])
+    tg.bot.register_callback_query_handler(
+        on_callback,
+        func=lambda c: c.data and (c.data.startswith(f"{CB}:") or (c.data.startswith("47:") and UUID in c.data))
+    )
+    tg.bot.register_message_handler(on_state_message, func=_is_pending)
+
+    if hasattr(crd, "add_telegram_commands"):
+        crd.add_telegram_commands(UUID, [
+            ("smmway", "Открыть меню плагина SMMWay", True),
+        ])
 
 
 def _set_state(tg_user_id: int, **kwargs):
@@ -3708,11 +3642,17 @@ def _show_order_card(c, order_id: str):
 
 def init_plugin(crd: "Cardinal", *args) -> None:
     """BIND_TO_PRE_INIT — инициализация плагина."""
-    _ensure_plugin_dir()
-    # File logging
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    logger.addHandler(fh)
+    try:
+        _ensure_plugin_dir()
+    except Exception:
+        pass
+    # File logging (may fail if no write permission — not critical)
+    try:
+        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        logger.addHandler(fh)
+    except Exception:
+        pass
     logger.setLevel(logging.INFO)
     logger.info("SMMWay plugin init: v%s", VERSION)
 
@@ -3750,4 +3690,4 @@ def on_delete(*args, **kwargs) -> None:
 BIND_TO_PRE_INIT = [init_plugin]
 BIND_TO_NEW_ORDER = [on_new_order]
 BIND_TO_NEW_MESSAGE = [on_new_message]
-BIND_TO_DELETE = on_delete
+BIND_TO_DELETE = [on_delete]
