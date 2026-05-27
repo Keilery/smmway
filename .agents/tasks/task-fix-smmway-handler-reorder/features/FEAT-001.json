@@ -21,5 +21,5 @@
     "cd /projects/sandbox/smmway && python3 -c \"import ast; ast.parse(open('smmway_v1.3.11 (2).py').read()); print('AST OK')\""
   ],
   "blocked_reason": null,
-  "findings": "Fix implemented successfully. Added _get_handler_filter() and _get_handler_fn() helpers that handle both dict-style handlers (pyTelegramBotAPI 3.x) and Handler objects (pyTelegramBotAPI 4.x). Verified with py_compile and ast.parse - no syntax errors."
+  "findings": "Replaced entire decorator + handler reordering approach with register_message_handler/register_callback_query_handler pattern (DesslyHub style). Removed helper functions, reordering code, and bot.set_my_commands block. Added cardinal.add_telegram_commands for BotFather menu. Verified with py_compile and ast.parse - no syntax errors."
 }
