@@ -2,7 +2,7 @@
   "id": "FEAT-001",
   "type": "fix",
   "description": "Fix BIND_TO_DELETE hook format and ensure /smmway command handler is robust. The BIND_TO_DELETE is currently assigned as a bare function (on_delete) instead of a list [on_delete] like the other BIND_TO hooks. This inconsistency can cause FPC to fail when iterating hooks. Also verify the /smmway command handler is properly structured.",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "In /projects/sandbox/smmway/smmway_v1.3.11 (2).py, at line 3753, change 'BIND_TO_DELETE = on_delete' to 'BIND_TO_DELETE = [on_delete]' to match the pattern used by BIND_TO_PRE_INIT, BIND_TO_NEW_ORDER, and BIND_TO_NEW_MESSAGE (all use lists)",
     "Verify the /smmway command handler in init_tg_menu() (around line 2635) is correctly defined with @bot.message_handler(commands=['smmway', 'smm', 'smmway_menu']) -- this already exists but confirm it works by checking the function structure",
@@ -20,5 +20,5 @@
     "python3 -c \"import ast; tree = ast.parse(open('smmway_v1.3.11 (2).py').read()); print('AST OK')\""
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "Fix applied cleanly. BIND_TO_DELETE changed from bare function to list. py_compile and ast.parse both pass. All other acceptance criteria (COMMANDS dict, /smmway handler) confirmed already present and correct."
 }

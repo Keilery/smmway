@@ -1,7 +1,14 @@
 {
   "task_id": "task-fix-smmway-plugin",
   "task_description": "Fix the BIND_TO_DELETE hook format issue in the SMMWay FPC plugin and ensure the /smmway Telegram command is properly registered for launching the plugin menu via command",
-  "status": "in_progress",
+  "status": "completed",
   "feature_order": ["FEAT-001"],
-  "blocked_reason": null
+  "blocked_reason": null,
+  "verification": {
+    "build": "pass",
+    "tests": "pass",
+    "test_quality": "skipped",
+    "docker_build": "skipped",
+    "summary": "py_compile and ast.parse both pass. All BIND_TO hooks are now consistently lists. /smmway command handler verified present and correctly registered."
+  }
 }

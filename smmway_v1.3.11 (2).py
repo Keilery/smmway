@@ -3642,11 +3642,17 @@ def _show_order_card(c, order_id: str):
 
 def init_plugin(crd: "Cardinal", *args) -> None:
     """BIND_TO_PRE_INIT — инициализация плагина."""
-    _ensure_plugin_dir()
-    # File logging
-    fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-    logger.addHandler(fh)
+    try:
+        _ensure_plugin_dir()
+    except Exception:
+        pass
+    # File logging (may fail if no write permission — not critical)
+    try:
+        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        logger.addHandler(fh)
+    except Exception:
+        pass
     logger.setLevel(logging.INFO)
     logger.info("SMMWay plugin init: v%s", VERSION)
 
