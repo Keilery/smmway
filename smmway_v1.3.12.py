@@ -438,18 +438,18 @@ DEFAULT_MSG_TEMPLATES = {
         "одним сообщением. Если услуга требует ник — напишите его."
     ),
     "order_created": (
-        "✅ Заказ #{smm_id} принят на smmway. Объём: {qty}. "
-        "Это автоматически, ждать ничего не нужно."
+        "✅ Заказ принят! Объём: {qty}. "
+        "Накрутка запущена автоматически, ждать ничего не нужно."
     ),
     "order_completed": (
-        "🎉 Заказ выполнен. Если всё ок — подтвердите выполнение и оставьте отзыв на FunPay. "
+        "🎉 Заказ выполнен! Если всё ок — подтвердите выполнение и оставьте отзыв. "
         "Спасибо!"
     ),
     "order_error": (
         "⚠️ Возникла проблема с заказом: {reason}. "
         "Возврат уже инициирован, при необходимости напишите продавцу."
     ),
-    "status_reply": "📊 Статус заказа #{smm_id}: {status}",
+    "status_reply": "📊 Статус заказа: {status}",
 }
 
 
@@ -1247,12 +1247,18 @@ def on_new_order(c: "Cardinal", e: "NewOrderEvent", *args) -> None:
         return
     order = e.order
     try:
-        lot = CTX.storage.find_lot_by_title(order.description)
+        # Пробуем найти лот: сначала по lot_id (если FPC передаёт), потом по описанию
+        lot = None
+        lot_id = getattr(order, "lot_id", None) or getattr(order, "subcategory_id", None)
+        if lot_id and int(lot_id) in CTX.storage.lots:
+            lot = CTX.storage.lots[int(lot_id)]
+        if not lot:
+            lot = CTX.storage.find_lot_by_title(getattr(order, "description", "") or "")
         if not lot or not lot.active:
             return
         service = CTX.api.find_service(lot.service_id) if CTX.api else None
         if not service:
-            notify_tg(f"⚠️ SMMWay: услуга #{lot.service_id} не найдена в каталоге, заказ {order.id} пропущен.")
+            notify_tg(f"⚠️ Услуга #{lot.service_id} не найдена в каталоге, заказ {order.id} пропущен.")
             return
 
         # --- Получаем данные покупателя ---
@@ -1516,8 +1522,7 @@ def _handle_status_command(c: "Cardinal", msg) -> None:
     if not found.smm_order_id:
         send_buyer_message(
             chat_id,
-            f"Заказ #{found.funpay_order_id} ещё не запущен на SMM-платформе.\n"
-            f"Статус: {found.status}",
+            f"Заказ ещё не запущен.\nСтатус: {found.status}",
             getattr(msg, "author", ""),
         )
         return
@@ -1528,7 +1533,7 @@ def _handle_status_command(c: "Cardinal", msg) -> None:
         logger.warning("status command API error: %s", ex)
         send_buyer_message(
             chat_id,
-            f"📊 Заказ SMM #{found.smm_order_id}\nСтатус: {found.smm_status_raw or found.status}\n"
+            f"📊 Статус заказа: {found.smm_status_raw or found.status}\n"
             f"(не удалось получить актуальные данные)",
             getattr(msg, "author", ""),
         )
@@ -1536,7 +1541,6 @@ def _handle_status_command(c: "Cardinal", msg) -> None:
     status = str(status_data.get("status", found.smm_status_raw or found.status))
     start_count = status_data.get("start_count", "?")
     remains = status_data.get("remains", "?")
-    charge = status_data.get("charge", "?")
     # Estimate time remaining
     time_info = ""
     try:
@@ -1558,11 +1562,9 @@ def _handle_status_command(c: "Cardinal", msg) -> None:
     reply = (
         f"📊 Подробный статус заказа\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 SMM-заказ: #{found.smm_order_id}\n"
         f"📌 Статус: {status}\n"
         f"📐 Начальный счётчик: {start_count}\n"
         f"📉 Осталось: {remains}\n"
-        f"💰 Списано: {charge}\n"
         f"📦 Заказано: {found.quantity}"
         f"{time_info}"
     )
@@ -1599,8 +1601,7 @@ def _handle_refill_command(c: "Cardinal", msg) -> None:
         refill_id = result.get("refill") or result.get("result") or ""
         send_buyer_message(
             chat_id,
-            f"♻️ Рефилл запрошен для заказа #{found.smm_order_id}.\n"
-            f"ID рефилла: {refill_id}\n"
+            f"♻️ Рефилл запрошен!\n"
             f"Повторная накрутка будет запущена автоматически.",
             getattr(msg, "author", ""),
         )
@@ -1678,9 +1679,9 @@ def _handle_cancel_command(c: "Cardinal", msg) -> None:
             refunded = True
         elif isinstance(cancel_status, str) and cancel_status.lower() in ("cancelled", "canceled"):
             refunded = True
-        status_msg = f"✅ Заказ #{found.smm_order_id} отменён на SMM-платформе."
+        status_msg = f"✅ Заказ отменён."
         if refunded:
-            status_msg += "\n💰 Средства возвращены на баланс SMM."
+            status_msg += "\n💰 Средства возвращены."
             # Attempt FunPay refund
             try:
                 if hasattr(c, "account") and hasattr(c.account, "refund"):
@@ -1690,7 +1691,7 @@ def _handle_cancel_command(c: "Cardinal", msg) -> None:
                 logger.warning("FunPay refund failed for %s: %s", found.funpay_order_id, refund_ex)
                 status_msg += "\n⚠️ Автоматический возврат на FunPay не удался, обратитесь к продавцу."
         else:
-            status_msg += "\n⚠️ SMM-платформа не подтвердила возврат средств."
+            status_msg += "\n⚠️ Платформа не подтвердила возврат средств."
         CTX.storage.update_order(found.funpay_order_id, status="refunded" if refunded else "error",
                                  smm_status_raw="Cancelled")
         send_buyer_message(chat_id, status_msg, getattr(msg, "author", ""))
@@ -1724,7 +1725,10 @@ def _handle_status_query(c: "Cardinal", msg) -> None:
         return
     status_text = found.smm_status_raw or found.status
     template = CTX.storage.templates["msg_status_reply"]
-    reply = template.format(smm_id=found.smm_order_id, status=status_text)
+    try:
+        reply = template.format(smm_id=found.smm_order_id, status=status_text)
+    except KeyError:
+        reply = template.format(status=status_text)
     send_buyer_message(chat_id, reply, getattr(msg, "author", ""))
 
 
@@ -1790,13 +1794,44 @@ def _format_order_started_notification(
     )
 
 
+# Категории услуг, которые требуют дополнительных параметров при заказе.
+# Ключ — подстрока в имени/категории услуги (lower), значение — dict доп. полей.
+# Некоторые SMM-платформы требуют, например, "runs" для Twitch viewers (сколько
+# минут стрима), "delay" для отложенных заказов и т.д.
+_SERVICE_EXTRA_PARAMS: list[tuple[list[str], dict[str, str]]] = [
+    # Twitch viewers (зрители стрима) — обычно требует "runs" (минуты просмотра)
+    (["twitch", "зрител", "viewer", "live viewer"], {"runs": "60"}),
+    # Twitch chat — иногда требует "runs"
+    (["twitch", "чат", "chat"], {"runs": "30"}),
+]
+
+
+def _build_extra_params(service: dict, link: str, quantity: int) -> dict | None:
+    """Определяет дополнительные параметры для заказа на SMM-платформе.
+
+    Некоторые услуги (Twitch viewers, стримы) требуют доп. полей (runs, delay и т.д.).
+    Возвращает dict с доп. параметрами или None, если они не нужны.
+    """
+    if not service:
+        return None
+    hay = _service_haystack(service)
+    for keywords, extra in _SERVICE_EXTRA_PARAMS:
+        # Все ключевые слова группы должны присутствовать
+        if all(kw in hay for kw in keywords):
+            return extra.copy()
+    return None
+
+
 def _process_smm_order(state: dict, link: str) -> None:
     lot: LotEntry = state["lot_entry"]
     quantity: int = state["quantity"]
     chat_id = state["chat_id"]
     funpay_order_id = state["funpay_order_id"]
     try:
-        smm_id = CTX.api.add_order(lot.service_id, link, quantity)
+        # Определяем доп. параметры для услуги (Twitch viewers/стримы и т.д.)
+        service = CTX.api.find_service(lot.service_id) if CTX.api else None
+        extra = _build_extra_params(service, link, quantity) if service else None
+        smm_id = CTX.api.add_order(lot.service_id, link, quantity, extra=extra)
         CTX.storage.update_order(
             funpay_order_id,
             smm_order_id=smm_id,
@@ -1832,9 +1867,12 @@ def _process_smm_order(state: dict, link: str) -> None:
         CTX.storage.stats["spent_rub"] = round(
             float(CTX.storage.stats.get("spent_rub", 0.0)) + smmway_charge, 4
         )
-        msg = CTX.storage.templates["msg_order_created"].format(
-            smm_id=smm_id, qty=quantity
-        )
+        try:
+            msg = CTX.storage.templates["msg_order_created"].format(
+                smm_id=smm_id, qty=quantity
+            )
+        except KeyError:
+            msg = CTX.storage.templates["msg_order_created"].format(qty=quantity)
         send_buyer_message(chat_id, msg)
         if CTX.storage.cfg.get("notify_order_created"):
             notify_tg(_format_order_started_notification(
