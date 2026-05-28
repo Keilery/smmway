@@ -1,0 +1,7 @@
+{
+  "task_id": "task-smmway-v1312",
+  "task_description": "Upgrade smmway plugin to v1.3.12: fix order processing bug, remove #smmway from descriptions, add !статус !рефилл !отмена chat commands, fix auto-pricing with proper minimum price floor",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001"],
+  "blocked_reason": null
+}
