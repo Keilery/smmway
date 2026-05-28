@@ -391,8 +391,8 @@ DEFAULT_CONFIG = {
     "notify_balance_after": True,
     "status_poll_interval_sec": 90,
     "max_buyer_link_wait_sec": 1800,
-    # FunPay позволяет цены ниже 1 руб; пол по-умолчанию убран, цена
-    # лота = smmway-цена × (1 + наценка%) × курс. Если хочешь жёсткий
+    # Минимальная цена лота (FP-валюта). По умолчанию 1.0 (минимум FunPay).
+    # Цена лота = smmway-цена × (1 + наценка%) × курс. Если хочешь другой
     # пол — поменяй здесь или через настройки (значение в FP-валюте).
     "min_lot_price": 1.0,
     # Принудительный маппинг платформа → ID подкатегории FunPay.
@@ -623,7 +623,11 @@ class Storage:
                 if not t:
                     continue
                 t_norm = t.strip().lower()
-                if t_norm in norm or norm in t_norm:
+                # title is substring of description (main direction)
+                if t_norm in norm:
+                    return e
+                # description is substring of title (reverse - only for non-trivial descriptions)
+                if len(norm) >= 10 and norm in t_norm:
                     return e
         return None
 
@@ -1521,6 +1525,16 @@ def _handle_cancel_command(c: "Cardinal", msg) -> None:
             getattr(msg, "author", ""),
         )
         return
+    # Refresh status before cancel to avoid cancelling completed orders
+    try:
+        fresh_status = CTX.api.order_status(found.smm_order_id)
+        fresh_raw = (fresh_status.get("status") or "").lower()
+        if fresh_raw in ("completed", "complete", "completed_partial"):
+            CTX.storage.update_order(found.funpay_order_id, status="completed", smm_status_raw=fresh_raw)
+            send_buyer_message(chat_id, "Завершённые заказы не могут быть отменены.", getattr(msg, "author", ""))
+            return
+    except Exception:
+        pass  # proceed with cancel attempt even if status check fails
     # Call cancel API
     try:
         result = CTX.api.cancel(found.smm_order_id)
@@ -1528,9 +1542,10 @@ def _handle_cancel_command(c: "Cardinal", msg) -> None:
         cancel_status = result.get("status") or result.get("cancel") or ""
         # Determine if refund happened on SMM side
         refunded = False
-        if isinstance(cancel_status, str) and "cancel" in cancel_status.lower():
+        # Check for explicit refund confirmation from API
+        if result.get("refund"):
             refunded = True
-        elif result.get("refund"):
+        elif isinstance(cancel_status, str) and cancel_status.lower() in ("cancelled", "canceled"):
             refunded = True
         status_msg = f"✅ Заказ #{found.smm_order_id} отменён на SMM-платформе."
         if refunded:
