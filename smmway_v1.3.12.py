@@ -391,10 +391,9 @@ DEFAULT_CONFIG = {
     "notify_balance_after": True,
     "status_poll_interval_sec": 90,
     "max_buyer_link_wait_sec": 1800,
-    # Минимальная цена лота (FP-валюта). По умолчанию 1.0 руб.
-    # Цена лота = (цена за 1 шт. на smmway) × (наценка% / 100) × курс.
-    # Если результат меньше min_lot_price — ставится min_lot_price.
-    "min_lot_price": 1.0,
+    # Минимальная цена лота. Формула: (цена за 1 ед.) * (наценка%/100) + цена за 1 ед.
+    # Если не получается выставить — пробуем 0.001, потом 1.
+    "min_lot_price": 0.001,
     # Принудительный маппинг платформа → ID подкатегории FunPay.
     # Используется, если авто-детект кладёт услуги «не туда». Например,
     # для Twitter правильная подкатегория FunPay имеет id=1260, и без
@@ -1075,25 +1074,25 @@ def render_lot(template: str, *, service: dict, lot: LotEntry, fp_price: float |
 
 def compute_fp_price(service: dict, *, markup_pct: float, rate: float = 1.0,
                      min_price: float = 1.0) -> float:
-    """Цена лота = (цена за 1 единицу на smmway) * (наценка% / 100).
+    """Цена лота = (цена за 1 ед. * наценка%/100) + цена за 1 ед.
 
     Пример: rate_per_1000 = 2.7 → за 1 шт = 0.0027.
-    Наценка 55% → 0.0027 * 55 / 100 = 0.001485.
+    Наценка 55% → 0.0027 * 55/100 = 0.001485 → 0.001485 + 0.0027 = 0.004185.
 
-    Если лот не получилось выставить из-за слишком маленькой цены —
-    ставим минимальную (1 руб).
+    Если лот не получается выставить — пробуем 0.001.
+    Если и так не получается — ставим 1.
     """
     try:
         rate_per_1000 = float(service.get("rate") or service.get("price") or 0)
     except (TypeError, ValueError):
         rate_per_1000 = 0.0
     per_unit = rate_per_1000 / 1000.0
-    price = per_unit * (markup_pct / 100.0)
-    price = round(price, 4)
-    # Если лот не выставляется из-за цены — ставим минимальную (1 руб)
-    floor = max(1.0, min_price)
-    if price < floor:
-        price = floor
+    markup_amount = per_unit * (markup_pct / 100.0)
+    price = markup_amount + per_unit
+    price = round(price, 6)
+    # Если лот не получается выставить — пробуем минимум 0.001
+    if price < 0.001:
+        price = 0.001
     return price
 
 
@@ -1848,7 +1847,19 @@ def update_all_prices(force: bool = False) -> tuple[int, int]:
             updated += 1
             time.sleep(1.5)  # rate limit FP
         except Exception as ex:
-            logger.warning("price update failed for lot %s: %s", lot.funpay_lot_id, ex)
+            # Если не получилось выставить — пробуем цену 1
+            logger.warning("price update failed for lot %s (price=%.6f): %s — retrying with price=1",
+                           lot.funpay_lot_id, new_price, ex)
+            try:
+                fields = CTX.cardinal.account.get_lot_fields(lot.funpay_lot_id)
+                fields.price = 1.0
+                CTX.cardinal.account.save_lot(fields)
+                lot.last_price_fp = 1.0
+                updated += 1
+                time.sleep(1.5)
+            except Exception as ex2:
+                logger.warning("price update failed for lot %s even with price=1: %s",
+                               lot.funpay_lot_id, ex2)
     if updated:
         CTX.storage.save_lots()
     return updated, total
@@ -1942,8 +1953,22 @@ def _replace_lot_inplace(lot: LotEntry, new_service: dict) -> bool:
         fields.price = price
         CTX.cardinal.account.save_lot(fields)
     except Exception as ex:
-        logger.warning("replace lot %s: save_lot failed: %s", lot.funpay_lot_id, ex)
-        return False
+        # Если не получилось — пробуем цену 1
+        logger.warning("replace lot %s: save_lot failed (price=%.6f): %s — retrying with price=1",
+                       lot.funpay_lot_id, price, ex)
+        try:
+            price = 1.0
+            patch["price"] = f"{price:.4f}"
+            if hasattr(fields, "edit_fields"):
+                fields.edit_fields(patch)
+            else:
+                fields.fields.update(patch)
+            fields.price = price
+            CTX.cardinal.account.save_lot(fields)
+        except Exception as ex2:
+            logger.warning("replace lot %s: save_lot failed even with price=1: %s",
+                           lot.funpay_lot_id, ex2)
+            return False
     # Обновляем привязку в storage
     CTX.storage.unbind_lot(lot.funpay_lot_id)
     new_lot = LotEntry(
