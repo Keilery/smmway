@@ -1407,7 +1407,8 @@ def _handle_status_command(c: "Cardinal", msg) -> None:
     try:
         from datetime import datetime as _dt
         created = _dt.fromisoformat(found.created_at.replace("Z", "+00:00"))
-        elapsed_sec = (datetime.now(created.tzinfo) if created.tzinfo else datetime.now() - created).total_seconds()
+        now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+        elapsed_sec = (now - created).total_seconds()
         if isinstance(remains, (int, float)) and isinstance(start_count, (int, float)):
             done = int(start_count) + found.quantity - int(remains)
             if done > 0 and int(remains) > 0:
