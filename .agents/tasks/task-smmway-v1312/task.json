@@ -1,0 +1,14 @@
+{
+  "task_id": "task-smmway-v1312",
+  "task_description": "Upgrade smmway plugin to v1.3.12: fix order processing bug, remove #smmway from descriptions, add !статус !рефилл !отмена chat commands, fix auto-pricing with proper minimum price floor",
+  "status": "completed",
+  "feature_order": ["FEAT-001"],
+  "blocked_reason": null,
+  "verification": {
+    "build": "pass",
+    "tests": "pass",
+    "test_quality": "pass",
+    "docker_build": "skipped",
+    "summary": "py_compile passes, AST validation confirms all new functions exist, content assertions verify all requirements met. Review feedback addressed (cancel heuristic, bidirectional match guard, stale state refresh, config comment)."
+  }
+}

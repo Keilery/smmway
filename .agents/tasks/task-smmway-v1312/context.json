@@ -1,0 +1,18 @@
+{
+  "project_type": "FunPay Cardinal (FPC) single-file Python plugin for automated SMM service reselling",
+  "language": "Python 3.11",
+  "build_system": "None (single .py file plugin loaded by FPC framework)",
+  "test_framework": "None (no tests exist; validation via Python syntax check)",
+  "build_command": "python3 -c \"import py_compile; py_compile.compile('smmway_v1.3.12.py', doraise=True)\"",
+  "test_command": "python3 -c \"import ast; ast.parse(open('smmway_v1.3.12.py').read()); print('AST OK')\"",
+  "verification_instructions": "1. Run python3 syntax check on the new file. 2. Verify no SyntaxError. 3. Check that all key functions exist and are properly structured.",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "No setup needed - single Python file plugin",
+  "environment_constraints": "INTEGRATIONS_ONLY network - cannot install packages, cannot access external APIs. Python 3.11 is pre-installed. Validation is via AST parsing and syntax checks only.",
+  "contribution_requirements": "Single file must remain self-contained. All logic in one .py file as required by FPC plugin architecture.",
+  "key_patterns": "Plugin uses: BIND_TO_NEW_ORDER, BIND_TO_NEW_MESSAGE, BIND_TO_PRE_INIT hooks. Storage is JSON files. Background threads for status polling, auto-pricing, auto-deactivation. PluginContext (CTX) singleton holds state. BuyerState tracks per-buyer chat state. Templates use Python str.format(). send_buyer_message(chat_id, text, buyer_username) sends FP messages. notify_tg(text) sends Telegram notifications.",
+  "relevant_files": [
+    "smmway_v1.3.11 (2).py"
+  ],
+  "directory_structure": "Root contains single plugin file 'smmway_v1.3.11 (2).py' (3694 lines) and README.md. Plugin stores data in storage/plugins/smmway/ at runtime."
+}
