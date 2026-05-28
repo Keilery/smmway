@@ -405,6 +405,12 @@ DEFAULT_CONFIG = {
     # случайной другой услугой, которая ещё не выставлена на FunPay
     # (а не просто деактивировать его).
     "auto_replace_missing_service": True,
+    # Авто-повтор при ошибке заказа: проверяет ссылку и баланс, пробует ещё раз.
+    # Если повторно ошибка — возврат денег, блокировка услуги, замена лота.
+    "auto_retry_on_error": True,
+    "auto_retry_max_attempts": 2,
+    # Чёрный список услуг: ID услуг smmway, которые дали ошибки и были заблокированы.
+    "blacklisted_services": [],
     "log_level": "INFO",
 }
 
@@ -1919,24 +1925,143 @@ def _process_smm_order(state: dict, link: str) -> None:
             except Exception:
                 pass
     except SMMWayError as ex:
+        # --- Авто-повтор при ошибке ---
+        if CTX.storage.cfg.get("auto_retry_on_error", True):
+            retry_result = _retry_order_on_error(lot, link, quantity, funpay_order_id, chat_id, ex)
+            if retry_result:
+                # Повтор удался — выходим
+                return
+        # Повтор не помог или выключен — стандартная обработка ошибки
         CTX.storage.update_order(funpay_order_id, status="error", error=str(ex))
         CTX.storage.stats["failed"] += 1
-        err_msg = CTX.storage.templates["msg_order_error"].format(reason=str(ex))
+        err_msg = CTX.storage.templates["msg_order_error"].format(reason="Услуга временно недоступна")
         send_buyer_message(chat_id, err_msg)
         if CTX.storage.cfg.get("notify_order_error"):
             notify_tg(
-                f"❌ SMMWay ошибка\n"
+                f"❌ Ошибка заказа\n"
                 f"FP: <code>#{funpay_order_id}</code>\n"
                 f"Услуга: <code>{lot.service_id}</code>\n"
                 f"Ссылка: <code>{html_escape(link)}</code>\n"
                 f"Причина: <code>{html_escape(str(ex))}</code>"
             )
-        # Try refund
+        # Возврат денег покупателю
         try:
             CTX.cardinal.account.refund(funpay_order_id)
-            notify_tg(f"💸 Возврат FP-заказа <code>#{funpay_order_id}</code> выполнен автоматически.")
+            notify_tg(f"💸 Возврат FP-заказа <code>#{funpay_order_id}</code> выполнен.")
         except Exception as rex:
             logger.warning("refund failed for %s: %s", funpay_order_id, rex)
+        # Блокируем услугу и заменяем лот
+        if CTX.storage.cfg.get("auto_retry_on_error", True):
+            _blacklist_and_replace_lot(lot)
+
+
+def _retry_order_on_error(lot: LotEntry, link: str, quantity: int,
+                           funpay_order_id: str, chat_id, original_error) -> bool:
+    """Пробует повторить заказ после ошибки.
+
+    1. Проверяет валидность ссылки (формат)
+    2. Проверяет баланс на SMM-платформе
+    3. Пробует заказ ещё раз
+
+    Возвращает True если повтор удался.
+    """
+    max_attempts = int(CTX.storage.cfg.get("auto_retry_max_attempts", 2))
+
+    # Проверка 1: ссылка валидна?
+    if not link or not (link.startswith("http") or re.match(r"^[A-Za-z0-9_.]{3,}$", link)):
+        logger.info("retry: link invalid, skipping retry: %s", link)
+        return False
+
+    # Проверка 2: баланс достаточен?
+    try:
+        service = CTX.api.find_service(lot.service_id)
+        if service:
+            rate_per_1000 = float(service.get("rate") or service.get("price") or 0)
+            needed = rate_per_1000 * quantity / 1000.0
+            balance = CTX.api.balance()
+            if balance < needed:
+                logger.info("retry: balance %.4f < needed %.4f, skipping", balance, needed)
+                notify_tg(f"⚠️ Повтор заказа невозможен: баланс ({balance:.4f}) меньше стоимости ({needed:.4f})")
+                return False
+    except Exception as ex:
+        logger.warning("retry: balance check failed: %s", ex)
+
+    # Проверка 3: услуга не в чёрном списке?
+    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+    if lot.service_id in blacklist:
+        logger.info("retry: service %s is blacklisted, skipping", lot.service_id)
+        return False
+
+    # Пробуем повторить
+    for attempt in range(1, max_attempts + 1):
+        try:
+            time.sleep(2 * attempt)  # пауза перед повтором
+            service = CTX.api.find_service(lot.service_id) if CTX.api else None
+            extra = _build_extra_params(service, link, quantity) if service else None
+            smm_id = CTX.api.add_order(lot.service_id, link, quantity, extra=extra)
+            # Успех!
+            CTX.storage.update_order(
+                funpay_order_id,
+                smm_order_id=smm_id,
+                link=link,
+                status="created",
+            )
+            CTX.storage.stats["sent"] += 1
+            try:
+                msg = CTX.storage.templates["msg_order_created"].format(smm_id=smm_id, qty=quantity)
+            except KeyError:
+                msg = CTX.storage.templates["msg_order_created"].format(qty=quantity)
+            send_buyer_message(chat_id, msg)
+            notify_tg(f"✅ Повтор заказа #{funpay_order_id} удался с попытки {attempt}")
+            return True
+        except SMMWayError as ex:
+            logger.warning("retry attempt %d/%d failed for order %s: %s",
+                          attempt, max_attempts, funpay_order_id, ex)
+            continue
+
+    # Все попытки исчерпаны
+    return False
+
+
+def _blacklist_and_replace_lot(lot: LotEntry) -> None:
+    """Блокирует услугу (добавляет в чёрный список), деактивирует лот и пытается заменить."""
+    service_id = lot.service_id
+
+    # Добавляем в чёрный список
+    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+    if service_id not in blacklist:
+        blacklist.append(service_id)
+        CTX.storage.cfg["blacklisted_services"] = blacklist
+        CTX.storage.save_config()
+        logger.info("service %s added to blacklist", service_id)
+
+    # Деактивируем лот
+    lot.active = False
+    CTX.storage.save_lots()
+
+    # Пробуем заменить другой услугой (если функция потеряшка включена)
+    if CTX.storage.cfg.get("auto_replace_missing_service"):
+        try:
+            services_map = {str(s.get("service")): s for s in CTX.api.services()}
+            # Исключаем заблокированные
+            for bl_id in blacklist:
+                services_map.pop(str(bl_id), None)
+            replacement = _pick_replacement_service(lot, services_map)
+            if replacement:
+                success = _replace_lot_inplace(lot, replacement)
+                if success:
+                    notify_tg(
+                        f"🔄 Услуга <code>#{service_id}</code> заблокирована.\n"
+                        f"Лот заменён на услугу <code>#{replacement.get('service')}</code>."
+                    )
+                    return
+        except Exception as ex:
+            logger.warning("blacklist replace failed: %s", ex)
+
+    notify_tg(
+        f"⛔ Услуга <code>#{service_id}</code> заблокирована и лот деактивирован.\n"
+        f"Замена не найдена."
+    )
 
 
 # =============================================================================
@@ -3041,6 +3166,7 @@ def main_menu_kb():
         B("🔑 API ключ", callback_data=f"{CB}:apikey"),
     )
     kb.add(B("📋 Заказы", callback_data=f"{CB}:orders:0"))
+    kb.add(B("⚙️ Настройки", callback_data=f"{CB}:settings"))
     kb.add(B("❤️ Health-check", callback_data=f"{CB}:health"))
     kb.add(B("🔄 Обновить", callback_data=f"{CB}:main"))
     return kb
@@ -3157,6 +3283,20 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
                 return
             if data == f"{CB}:health":
                 _show_health(c)
+                return
+            if data == f"{CB}:settings":
+                _show_settings_menu(c)
+                return
+            if data == f"{CB}:settings_toggle_retry":
+                CTX.storage.cfg["auto_retry_on_error"] = not CTX.storage.cfg.get("auto_retry_on_error", True)
+                CTX.storage.save_config()
+                _show_settings_menu(c)
+                return
+            if data == f"{CB}:settings_reset_blacklist":
+                CTX.storage.cfg["blacklisted_services"] = []
+                CTX.storage.save_config()
+                bot.answer_callback_query(c.id, "Чёрный список сброшен!")
+                _show_settings_menu(c)
                 return
             if data == f"{CB}:apikey":
                 _show_apikey_menu(c)
@@ -3368,6 +3508,47 @@ def _set_state(tg_user_id: int, **kwargs):
 
 
 # --- submenus ---
+
+
+def _show_settings_menu(c):
+    """Показывает меню настроек плагина."""
+    bot = CTX.cardinal.telegram.bot
+    K, B = _kbd()
+
+    retry_enabled = CTX.storage.cfg.get("auto_retry_on_error", True)
+    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+    max_attempts = CTX.storage.cfg.get("auto_retry_max_attempts", 2)
+
+    lines = [
+        "<b>⚙️ Настройки</b>",
+        "",
+        f"<b>🔄 Авто-повтор при ошибке:</b> {'🟢 Вкл' if retry_enabled else '🔴 Выкл'}",
+        f"   Попыток: {max_attempts}",
+        "",
+        f"<b>🚫 Чёрный список услуг:</b> {len(blacklist)} шт.",
+    ]
+    if blacklist:
+        # Показываем первые 10
+        shown = blacklist[:10]
+        lines.append(f"   IDs: {', '.join(str(x) for x in shown)}")
+        if len(blacklist) > 10:
+            lines.append(f"   ... и ещё {len(blacklist) - 10}")
+    lines.append("")
+    lines.append("<i>При ошибке заказа бот проверяет ссылку и баланс, "
+                 "пробует ещё раз. Если повторно ошибка — возврат денег, "
+                 "блокировка услуги и замена лота.</i>")
+
+    kb = K(row_width=1)
+    kb.add(
+        B(("🟢" if retry_enabled else "🔴") + " Авто-повтор", callback_data=f"{CB}:settings_toggle_retry"),
+    )
+    if blacklist:
+        kb.add(B(f"🗑 Сброс чёрного списка ({len(blacklist)})", callback_data=f"{CB}:settings_reset_blacklist"))
+    kb.add(B("◀️ Меню", callback_data=f"{CB}:main"))
+
+    bot.edit_message_text("\n".join(lines), c.message.chat.id, c.message.id,
+                          reply_markup=kb, parse_mode="HTML")
+    bot.answer_callback_query(c.id)
 
 
 def _show_health(c):
