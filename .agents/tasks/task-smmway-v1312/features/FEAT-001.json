@@ -2,7 +2,7 @@
   "id": "FEAT-001",
   "type": "fix",
   "description": "Create smmway_v1.3.12.py from the existing file, fix the order processing bug, remove #smmway from descriptions, fix auto-pricing, and add chat commands !статус !рефилл !отмена",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "1. Copy 'smmway_v1.3.11 (2).py' to 'smmway_v1.3.12.py' and update VERSION to '1.3.12'.",
     "2. FIX ORDER PROCESSING BUG in on_new_order (line ~1132): The handler accesses order.chat_id which may not exist on FPC's NewOrderEvent.order object. Add safe attribute access with fallback: use getattr(order, 'chat_id', None) or getattr(order, 'buyer_id', None) or getattr(order, 'buyer_node_id', None). Similarly for buyer_username and buyer_id - use getattr with fallbacks. Wrap the critical section so AttributeError doesn't silently skip orders.",
@@ -36,5 +36,5 @@
     "Run: cd /projects/sandbox/smmway && python3 -c \"content = open('smmway_v1.3.12.py').read(); assert '#smmway' not in content; assert 'VERSION = \\\"1.3.12\\\"' in content; assert '!статус' in content; assert '!рефилл' in content; assert '!отмена' in content; assert 'min_lot_price' in content; print('All checks passed')\""
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "All changes implemented successfully. Found an additional #smmway occurrence in a fallback English description generator function (line ~930) beyond the DEFAULT_LOT_TEMPLATE templates - removed it as well. The _handle_status_command time estimation uses a try/except wrapper since datetime arithmetic may vary depending on timezone info availability."
 }
