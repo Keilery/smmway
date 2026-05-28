@@ -1385,22 +1385,40 @@ def on_new_message(c: "Cardinal", e: "NewMessageEvent", *args) -> None:
     chat_id = getattr(msg, "chat_id", None)
     if buyer_id is None and chat_id is None:
         return
-    # Ищем state по buyer_id или по chat_id (FPC может передавать разные идентификаторы)
+    # Атомарно забираем state (pop) — если кто-то уже забрал, получим None.
+    # Это предотвращает обработку второй ссылки от того же покупателя.
     state = None
     if buyer_id is not None:
-        state = CTX.buyer_state.get(buyer_id)
-    if (not state or state.get("type") != "awaiting_link") and chat_id is not None:
-        state = CTX.buyer_state.get(chat_id)
+        state = CTX.buyer_state.pop_awaiting_link(buyer_id)
+    if not state and chat_id is not None:
+        state = CTX.buyer_state.pop_awaiting_link(chat_id)
     if not state or state.get("type") != "awaiting_link":
         return
+    # Дополнительно удаляем второй ключ (если state был по обоим)
+    if state and buyer_id is not None:
+        CTX.buyer_state.pop_awaiting_link(buyer_id)
+    if state and chat_id is not None:
+        CTX.buyer_state.pop_awaiting_link(chat_id)
+    # Проверяем, что заказ в storage ещё ждёт ссылку (не обработан другим потоком)
+    funpay_order_id = state.get("funpay_order_id")
+    if funpay_order_id:
+        order_entry = CTX.storage.orders.get(funpay_order_id)
+        if order_entry and order_entry.status != "awaiting_link":
+            # Заказ уже обработан — игнорируем повторную ссылку
+            logger.debug("ignoring duplicate link for order %s (status=%s)",
+                        funpay_order_id, order_entry.status)
+            return
     link = parse_link_or_username(text)
     if not link:
+        # State уже удалён, но ссылка не распознана — возвращаем state обратно
+        CTX.buyer_state.set_awaiting_link(
+            buyer_id or chat_id,
+            state["funpay_order_id"],
+            state["lot_entry"],
+            state["quantity"],
+            state["chat_id"],
+        )
         return
-    # pop из обоих возможных ключей
-    if buyer_id is not None:
-        CTX.buyer_state.pop_awaiting_link(buyer_id)
-    if chat_id is not None:
-        CTX.buyer_state.pop_awaiting_link(chat_id)
     _process_smm_order(state, link)
 
 
@@ -1827,6 +1845,14 @@ def _process_smm_order(state: dict, link: str) -> None:
     quantity: int = state["quantity"]
     chat_id = state["chat_id"]
     funpay_order_id = state["funpay_order_id"]
+
+    # Финальная проверка: заказ ещё ждёт ссылку? (защита от дублей)
+    order_entry = CTX.storage.orders.get(funpay_order_id)
+    if order_entry and order_entry.status != "awaiting_link":
+        logger.warning("_process_smm_order: order %s already in status '%s', skipping duplicate",
+                       funpay_order_id, order_entry.status)
+        return
+
     try:
         # Определяем доп. параметры для услуги (Twitch viewers/стримы и т.д.)
         service = CTX.api.find_service(lot.service_id) if CTX.api else None
