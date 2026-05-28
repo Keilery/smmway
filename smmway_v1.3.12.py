@@ -3298,6 +3298,28 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
                 bot.answer_callback_query(c.id, "Чёрный список сброшен!")
                 _show_settings_menu(c)
                 return
+            if data.startswith(f"{CB}:bl_remove:"):
+                # Удаление конкретного ID из чёрного списка
+                try:
+                    sid = int(data.split(":")[2])
+                    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+                    if sid in blacklist:
+                        blacklist.remove(sid)
+                        CTX.storage.cfg["blacklisted_services"] = blacklist
+                        CTX.storage.save_config()
+                        bot.answer_callback_query(c.id, f"Услуга #{sid} удалена из чёрного списка")
+                    else:
+                        bot.answer_callback_query(c.id, f"#{sid} не в списке")
+                except (ValueError, IndexError):
+                    bot.answer_callback_query(c.id, "Ошибка")
+                _show_settings_menu(c)
+                return
+            if data == f"{CB}:bl_remove_manual":
+                bot.send_message(c.message.chat.id,
+                                 "Введи ID услуги (или несколько через запятую/пробел) для удаления из чёрного списка:")
+                _set_state(c.from_user.id, kind="bl_remove_ids")
+                bot.answer_callback_query(c.id)
+                return
             if data == f"{CB}:apikey":
                 _show_apikey_menu(c)
                 return
@@ -3483,6 +3505,35 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
                 bot.reply_to(m, f"Привязано: лот #{lot_id} ↔ услуга #{service_id}")
             elif kind == "autolots_ids":
                 _run_autolots(m, m.text)
+            elif kind == "bl_remove_ids":
+                # Удаление ID из чёрного списка вручную
+                raw = m.text.strip()
+                ids_to_remove = []
+                for token in re.split(r"[,\s;]+", raw):
+                    token = token.strip()
+                    if token.isdigit():
+                        ids_to_remove.append(int(token))
+                if not ids_to_remove:
+                    bot.reply_to(m, "Не найдено ни одного числового ID. Введи числа через запятую или пробел.")
+                    return
+                blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+                removed = []
+                not_found = []
+                for sid in ids_to_remove:
+                    if sid in blacklist:
+                        blacklist.remove(sid)
+                        removed.append(str(sid))
+                    else:
+                        not_found.append(str(sid))
+                CTX.storage.cfg["blacklisted_services"] = blacklist
+                CTX.storage.save_config()
+                reply_parts = []
+                if removed:
+                    reply_parts.append(f"✅ Удалены из чёрного списка: {', '.join(removed)}")
+                if not_found:
+                    reply_parts.append(f"⚠️ Не были в списке: {', '.join(not_found)}")
+                reply_parts.append(f"Осталось в списке: {len(blacklist)} шт.")
+                bot.reply_to(m, "\n".join(reply_parts))
         except Exception as ex:
             bot.reply_to(m, f"Ошибка: {ex}")
             logger.exception("on_state_message failed")
@@ -3528,22 +3579,37 @@ def _show_settings_menu(c):
         f"<b>🚫 Чёрный список услуг:</b> {len(blacklist)} шт.",
     ]
     if blacklist:
-        # Показываем первые 10
-        shown = blacklist[:10]
-        lines.append(f"   IDs: {', '.join(str(x) for x in shown)}")
-        if len(blacklist) > 10:
-            lines.append(f"   ... и ещё {len(blacklist) - 10}")
+        lines.append("   Нажми на ID чтобы убрать из списка:")
+        for sid in blacklist[:20]:
+            svc = CTX.api.find_service(sid) if CTX.api else None
+            name = (svc.get("name", "")[:30] if svc else "неизвестна")
+            lines.append(f"   • <code>{sid}</code> — {html_escape(name)}")
+        if len(blacklist) > 20:
+            lines.append(f"   ... и ещё {len(blacklist) - 20}")
     lines.append("")
     lines.append("<i>При ошибке заказа бот проверяет ссылку и баланс, "
                  "пробует ещё раз. Если повторно ошибка — возврат денег, "
                  "блокировка услуги и замена лота.</i>")
+    lines.append("")
+    lines.append("<i>Чтобы удалить конкретный ID — нажми кнопку ниже "
+                 "или отправь команду «Удалить ID» и введи номер.</i>")
 
     kb = K(row_width=1)
     kb.add(
         B(("🟢" if retry_enabled else "🔴") + " Авто-повтор", callback_data=f"{CB}:settings_toggle_retry"),
     )
+    # Кнопки для удаления отдельных услуг из чёрного списка (показываем до 10)
     if blacklist:
-        kb.add(B(f"🗑 Сброс чёрного списка ({len(blacklist)})", callback_data=f"{CB}:settings_reset_blacklist"))
+        row = []
+        for sid in blacklist[:10]:
+            row.append(B(f"❌ {sid}", callback_data=f"{CB}:bl_remove:{sid}"))
+            if len(row) == 3:
+                kb.row(*row)
+                row = []
+        if row:
+            kb.row(*row)
+        kb.add(B(f"🗑 Сбросить весь список ({len(blacklist)})", callback_data=f"{CB}:settings_reset_blacklist"))
+    kb.add(B("✏️ Удалить ID вручную", callback_data=f"{CB}:bl_remove_manual"))
     kb.add(B("◀️ Меню", callback_data=f"{CB}:main"))
 
     bot.edit_message_text("\n".join(lines), c.message.chat.id, c.message.id,
