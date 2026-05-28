@@ -1,0 +1,40 @@
+{
+  "id": "FEAT-001",
+  "type": "fix",
+  "description": "Create smmway_v1.3.12.py from the existing file, fix the order processing bug, remove #smmway from descriptions, fix auto-pricing, and add chat commands !статус !рефилл !отмена",
+  "status": "in_progress",
+  "steps": [
+    "1. Copy 'smmway_v1.3.11 (2).py' to 'smmway_v1.3.12.py' and update VERSION to '1.3.12'.",
+    "2. FIX ORDER PROCESSING BUG in on_new_order (line ~1132): The handler accesses order.chat_id which may not exist on FPC's NewOrderEvent.order object. Add safe attribute access with fallback: use getattr(order, 'chat_id', None) or getattr(order, 'buyer_id', None) or getattr(order, 'buyer_node_id', None). Similarly for buyer_username and buyer_id - use getattr with fallbacks. Wrap the critical section so AttributeError doesn't silently skip orders.",
+    "3. FIX find_lot_by_title (line ~605): The current matching only checks if stored title is IN description. Add reverse check: also match if description is IN stored title. Add a third fallback: match by funpay_lot_id if order has offer_id or lot_id attribute. This ensures lot matching works even when FPC truncates titles.",
+    "4. REMOVE '#smmway' from DEFAULT_LOT_TEMPLATE_RU and DEFAULT_LOT_TEMPLATE_EN description templates (line ~423-441). Remove the '#smmway' line from both templates.",
+    "5. FIX AUTO-PRICING in compute_fp_price (line ~1054): The formula per_unit_rub * (1.0 + markup_pct / 100.0) * rate is correct for the business logic. BUT ensure min_price works as a proper floor: set DEFAULT_CONFIG min_lot_price to 1.0 (1 ruble minimum, which is the FunPay minimum). This ensures that when computed price is too small, the minimum allowed price is used instead.",
+    "6. ENSURE ПОТЕРЯШКА (_replace_lot_inplace at line ~1651) uses the same compute_fp_price with the same min_price logic. It already does, so just verify min_price is propagated from config properly.",
+    "7. ADD CHAT COMMANDS to on_new_message handler: detect !статус, !рефилл, !отмена (with ! prefix). Route to new handler functions.",
+    "8. IMPLEMENT !статус command handler (_handle_status_command): Find the latest order for the buyer. Call CTX.api.order_status(smm_order_id) to get fresh data. Show detailed stats: order ID, status, start_count, remains, charge, estimated time remaining (estimate based on progress rate). Format as a clear multi-line message.",
+    "9. IMPLEMENT !рефилл command handler (_handle_refill_command): Find the latest completed order for the buyer. Check if the service supports refill (service.get('refill') is truthy). If not supported, reply with error. If supported, call CTX.api.refill(smm_order_id). Notify buyer of success/failure.",
+    "10. IMPLEMENT !отмена command handler (_handle_cancel_command): Find the latest active (non-completed) order for the buyer. If order status is 'completed', reply that completed orders cannot be cancelled. Otherwise call CTX.api.cancel(smm_order_id). Check if cancellation was successful and if money was refunded. Only if the API confirms refund, initiate FunPay refund. Notify buyer of result.",
+    "11. UPDATE lot description templates to mention the new commands. Add to both RU and EN templates a section listing available commands: !статус, !рефилл, !отмена with brief descriptions.",
+    "12. UPDATE the render_lot function's 'commands' variable to include the three new commands in the rendered text instead of just 'Отправьте ссылку - заказ запустится автоматически'."
+  ],
+  "acceptance_criteria": [
+    "File smmway_v1.3.12.py exists and passes Python syntax validation (py_compile)",
+    "VERSION variable is '1.3.12'",
+    "on_new_order uses safe getattr() for order.chat_id, order.buyer_id, order.buyer_username with fallbacks",
+    "find_lot_by_title does bidirectional substring matching (title in desc AND desc in title)",
+    "#smmway removed from both RU and EN description templates",
+    "DEFAULT_CONFIG min_lot_price is set to 1.0 (minimum 1 ruble)",
+    "on_new_message recognizes !статус, !рефилл, !отмена commands",
+    "!статус shows detailed order info including remains, start_count, charge, estimated time",
+    "!рефилл checks service.refill before attempting refill",
+    "!отмена refuses to cancel completed orders and only refunds if API confirms",
+    "Lot description templates include command documentation for buyers"
+  ],
+  "verification": [
+    "Run: cd /projects/sandbox/smmway && python3 -c \"import py_compile; py_compile.compile('smmway_v1.3.12.py', doraise=True)\" - must pass",
+    "Run: cd /projects/sandbox/smmway && python3 -c \"import ast; tree = ast.parse(open('smmway_v1.3.12.py').read()); funcs = [n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]; assert '_handle_refill_command' in funcs; assert '_handle_cancel_command' in funcs; print('All new functions found')\"",
+    "Run: cd /projects/sandbox/smmway && python3 -c \"content = open('smmway_v1.3.12.py').read(); assert '#smmway' not in content; assert 'VERSION = \\\"1.3.12\\\"' in content; assert '!статус' in content; assert '!рефилл' in content; assert '!отмена' in content; assert 'min_lot_price' in content; print('All checks passed')\""
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}
