@@ -391,9 +391,9 @@ DEFAULT_CONFIG = {
     "notify_balance_after": True,
     "status_poll_interval_sec": 90,
     "max_buyer_link_wait_sec": 1800,
-    # Минимальная цена лота (FP-валюта). По умолчанию 1.0 (минимум FunPay).
-    # Цена лота = smmway-цена × (1 + наценка%) × курс. Если хочешь другой
-    # пол — поменяй здесь или через настройки (значение в FP-валюте).
+    # Минимальная цена лота (FP-валюта). По умолчанию 1.0 руб.
+    # Цена лота = (цена за 1 шт. на smmway) × (наценка% / 100) × курс.
+    # Если результат меньше min_lot_price — ставится min_lot_price.
     "min_lot_price": 1.0,
     # Принудительный маппинг платформа → ID подкатегории FunPay.
     # Используется, если авто-детект кладёт услуги «не туда». Например,
@@ -1074,26 +1074,27 @@ def render_lot(template: str, *, service: dict, lot: LotEntry, fp_price: float |
 
 
 def compute_fp_price(service: dict, *, markup_pct: float, rate: float,
-                     min_price: float = 0.0) -> float:
-    """SMM-цена за 1000 → FP-цена за 1 шт., с учётом наценки и курса.
+                     min_price: float = 1.0) -> float:
+    """SMM-цена за 1 единицу × наценка%.
 
-    FunPay позволяет цены меньше рубля — поэтому фиксируем порог только
-    как анти-ноль (1e-4): иначе для услуг с очень дешёвой ставкой за 1000
-    цена за 1 шт. при наценке всё равно осталась бы микроскопической, но
-    хотя бы не нулевой (нулевую FunPay не принимает). ``min_price`` оставлен
-    как опциональный параметр для совместимости — если юзер хочет жёстко
-    задрать пол, он передаст значение явно.
+    Формула: (цена за 1 единицу на smmway) * (наценка% / 100).
+    Пример: если rate_per_1000 = 2.7 (т.е. 0.0027 за 1 шт.) и наценка = 55%,
+    то price = 0.0027 * (55 / 100) = 0.001485.
+
+    Если итоговая цена слишком мала и лот не выставляется — ставим 1 руб.
     """
     try:
         rate_per_1000 = float(service.get("rate") or service.get("price") or 0)
     except (TypeError, ValueError):
         rate_per_1000 = 0.0
     per_unit_rub = rate_per_1000 / 1000.0
-    price = per_unit_rub * (1.0 + markup_pct / 100.0) * rate
+    price = per_unit_rub * (markup_pct / 100.0) * rate
     price = round(price, 4)
-    # Анти-ноль: FunPay не принимает 0. Если пол min_price выставлен — уважаем.
-    floor = max(0.0001, min_price)
-    return max(price, floor)
+    # Если цена слишком маленькая (лот не выставится) — ставим минимум 1 руб.
+    floor = max(1.0, min_price)
+    if price < floor:
+        price = floor
+    return price
 
 
 # =============================================================================
@@ -1823,7 +1824,7 @@ def update_all_prices(force: bool = False) -> tuple[int, int]:
     services = {str(s.get("service")): s for s in CTX.api.services()}
     global_markup = CTX.storage.cfg.get("global_markup_pct", 55.0)
     rate = CTX.storage.cfg.get("currency_rate_rub_to_fp", 1.0)
-    min_price = CTX.storage.cfg.get("min_lot_price", 0.0)
+    min_price = CTX.storage.cfg.get("min_lot_price", 1.0)
     jump_cap = CTX.storage.cfg.get("auto_price_jump_cap_pct", 200.0) / 100.0
     for lot in list(CTX.storage.lots.values()):
         if not lot.active:
@@ -1921,7 +1922,7 @@ def _replace_lot_inplace(lot: LotEntry, new_service: dict) -> bool:
     desc_en = _sanitize_en(desc_en, kind="desc", service=new_service)
     markup = lot.markup_pct if lot.markup_pct is not None else CTX.storage.cfg.get("global_markup_pct", 55.0)
     rate = CTX.storage.cfg.get("currency_rate_rub_to_fp", 1.0)
-    min_price = CTX.storage.cfg.get("min_lot_price", 0.0)
+    min_price = CTX.storage.cfg.get("min_lot_price", 1.0)
     price = compute_fp_price(new_service, markup_pct=markup, rate=rate, min_price=min_price)
     patch = {
         "fields[summary][ru]": title_ru[:80],
@@ -3441,7 +3442,7 @@ def _run_autolots_body(m, text: str):
         return
     markup = CTX.storage.cfg.get("global_markup_pct", 55.0)
     rate = CTX.storage.cfg.get("currency_rate_rub_to_fp", 1.0)
-    min_price = CTX.storage.cfg.get("min_lot_price", 0.0)
+    min_price = CTX.storage.cfg.get("min_lot_price", 1.0)
     try:
         services_map = {str(s.get("service")): s for s in CTX.api.services()}
     except Exception as ex:
