@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 # =============================================================================
 
 NAME = "SMMWay"
-VERSION = "1.3.11"
+VERSION = "1.5.01"
 DESCRIPTION = (
     "Автоматическая перепродажа услуг накрутки smmway.ru через FunPay Cardinal.\n"
     "• Автосоздание лотов из услуг smmway с нуля (без существующего лота-шаблона).\n"
@@ -391,10 +391,9 @@ DEFAULT_CONFIG = {
     "notify_balance_after": True,
     "status_poll_interval_sec": 90,
     "max_buyer_link_wait_sec": 1800,
-    # FunPay позволяет цены ниже 1 руб; пол по-умолчанию убран, цена
-    # лота = smmway-цена × (1 + наценка%) × курс. Если хочешь жёсткий
-    # пол — поменяй здесь или через настройки (значение в FP-валюте).
-    "min_lot_price": 0.0,
+    # Минимальная цена лота. Формула: (цена за 1 ед.) * (наценка%/100) + цена за 1 ед.
+    # Если не получается выставить — пробуем 0.001, потом 1.
+    "min_lot_price": 0.001,
     # Принудительный маппинг платформа → ID подкатегории FunPay.
     # Используется, если авто-детект кладёт услуги «не туда». Например,
     # для Twitter правильная подкатегория FunPay имеет id=1260, и без
@@ -406,6 +405,12 @@ DEFAULT_CONFIG = {
     # случайной другой услугой, которая ещё не выставлена на FunPay
     # (а не просто деактивировать его).
     "auto_replace_missing_service": True,
+    # Авто-повтор при ошибке заказа: проверяет ссылку и баланс, пробует ещё раз.
+    # Если повторно ошибка — возврат денег, блокировка услуги, замена лота.
+    "auto_retry_on_error": True,
+    "auto_retry_max_attempts": 2,
+    # Чёрный список услуг: ID услуг smmway, которые дали ошибки и были заблокированы.
+    "blacklisted_services": [],
     "log_level": "INFO",
 }
 
@@ -417,8 +422,7 @@ DEFAULT_LOT_TEMPLATE_RU = {
         "{tags}\n\n"
         "{features}\n\n"
         "📋 Команды:\n"
-        "{commands}\n\n"
-        "#smmway"
+        "{commands}"
     ),
 }
 
@@ -429,8 +433,7 @@ DEFAULT_LOT_TEMPLATE_EN = {
         "{tags_en}\n\n"
         "{features_en}\n\n"
         "📋 Commands:\n"
-        "{commands_en}\n\n"
-        "#smmway"
+        "{commands_en}"
     ),
 }
 
@@ -441,18 +444,18 @@ DEFAULT_MSG_TEMPLATES = {
         "одним сообщением. Если услуга требует ник — напишите его."
     ),
     "order_created": (
-        "✅ Заказ #{smm_id} принят на smmway. Объём: {qty}. "
-        "Это автоматически, ждать ничего не нужно."
+        "✅ Заказ принят! Объём: {qty}. "
+        "Накрутка запущена автоматически, ждать ничего не нужно."
     ),
     "order_completed": (
-        "🎉 Заказ выполнен. Если всё ок — подтвердите выполнение и оставьте отзыв на FunPay. "
+        "🎉 Заказ выполнен! Если всё ок — подтвердите выполнение и оставьте отзыв. "
         "Спасибо!"
     ),
     "order_error": (
         "⚠️ Возникла проблема с заказом: {reason}. "
         "Возврат уже инициирован, при необходимости напишите продавцу."
     ),
-    "status_reply": "📊 Статус заказа #{smm_id}: {status}",
+    "status_reply": "📊 Статус заказа: {status}",
 }
 
 
@@ -613,10 +616,23 @@ class Storage:
             for e in self.lots.values():
                 if e.service_id == sid:
                     return e
-        # 2. Match by exact title
+        # 2. Match by lot_id in description (format "#lot:123")
+        lot_m = re.search(r"#lot:(\d+)", description)
+        if lot_m:
+            lid = int(lot_m.group(1))
+            if lid in self.lots:
+                return self.lots[lid]
+        # 3. Bidirectional title match
         for e in self.lots.values():
             for t in (e.title_ru, e.title_en):
-                if t and t.strip().lower() in norm:
+                if not t:
+                    continue
+                t_norm = t.strip().lower()
+                # title is substring of description (main direction)
+                if t_norm in norm:
+                    return e
+                # description is substring of title (reverse - only for non-trivial descriptions)
+                if len(norm) >= 10 and norm in t_norm:
                     return e
         return None
 
@@ -919,8 +935,7 @@ def _sanitize_en(text: str, *, kind: str, service: dict | None = None) -> str:
         return "🌟 SMM 🌟 | ❤️ Service ❤️ | ✅FAST✅"
     return (
         "SMM service.\nStable, instant start.\n\n"
-        "Send the link — the order will start automatically.\n\n"
-        "#smmway"
+        "Send the link — the order will start automatically."
     )
 
 
@@ -1016,8 +1031,20 @@ def render_lot(template: str, *, service: dict, lot: LotEntry, fp_price: float |
         features.append("⛔ Возможна отмена")
     min_ = service.get("min", "")
     max_ = service.get("max", "")
-    commands = "Отправьте ссылку — заказ запустится автоматически."
-    commands_en = "Send the link — the order will start automatically."
+    commands = (
+        "Отправьте ссылку — заказ запустится автоматически.\n\n"
+        "📋 Доступные команды в чате:\n"
+        "!статус — подробная информация о заказе\n"
+        "!рефилл — повторная накрутка (не на всех услугах)\n"
+        "!отмена — отмена заказа (деньги вернутся, если SMM-платформа подтвердит)"
+    )
+    commands_en = (
+        "Send the link — the order will start automatically.\n\n"
+        "📋 Available chat commands:\n"
+        "!статус — detailed order info\n"
+        "!рефилл — re-order (not available for all services)\n"
+        "!отмена — cancel order (refund only if confirmed by SMM platform)"
+    )
     # Безопасный фоллбек, чтобы заголовок не становился неподтвержденно-английским:
     # если type_en сам по себе содержит кириллицу (например, fallback по первому
     # слову имени услуги) — заменяем на нейтральное "Service".
@@ -1051,27 +1078,28 @@ def render_lot(template: str, *, service: dict, lot: LotEntry, fp_price: float |
 # =============================================================================
 
 
-def compute_fp_price(service: dict, *, markup_pct: float, rate: float,
-                     min_price: float = 0.0) -> float:
-    """SMM-цена за 1000 → FP-цена за 1 шт., с учётом наценки и курса.
+def compute_fp_price(service: dict, *, markup_pct: float, rate: float = 1.0,
+                     min_price: float = 1.0) -> float:
+    """Цена лота = (цена за 1 ед. * наценка%/100) + цена за 1 ед.
 
-    FunPay позволяет цены меньше рубля — поэтому фиксируем порог только
-    как анти-ноль (1e-4): иначе для услуг с очень дешёвой ставкой за 1000
-    цена за 1 шт. при наценке всё равно осталась бы микроскопической, но
-    хотя бы не нулевой (нулевую FunPay не принимает). ``min_price`` оставлен
-    как опциональный параметр для совместимости — если юзер хочет жёстко
-    задрать пол, он передаст значение явно.
+    Пример: rate_per_1000 = 2.7 → за 1 шт = 0.0027.
+    Наценка 55% → 0.0027 * 55/100 = 0.001485 → 0.001485 + 0.0027 = 0.004185.
+
+    Если лот не получается выставить — пробуем 0.001.
+    Если и так не получается — ставим 1.
     """
     try:
         rate_per_1000 = float(service.get("rate") or service.get("price") or 0)
     except (TypeError, ValueError):
         rate_per_1000 = 0.0
-    per_unit_rub = rate_per_1000 / 1000.0
-    price = per_unit_rub * (1.0 + markup_pct / 100.0) * rate
-    price = round(price, 4)
-    # Анти-ноль: FunPay не принимает 0. Если пол min_price выставлен — уважаем.
-    floor = max(0.0001, min_price)
-    return max(price, floor)
+    per_unit = rate_per_1000 / 1000.0
+    markup_amount = per_unit * (markup_pct / 100.0)
+    price = markup_amount + per_unit
+    price = round(price, 6)
+    # Если лот не получается выставить — пробуем минимум 0.001
+    if price < 0.001:
+        price = 0.001
+    return price
 
 
 # =============================================================================
@@ -1112,12 +1140,103 @@ CTX = PluginContext()
 
 
 def send_buyer_message(chat_id: int | str, text: str, buyer_username: str = "") -> None:
+    """Отправляет сообщение покупателю в чат FunPay.
+
+    FPC Cardinal поддерживает несколько способов отправки:
+    1. cardinal.send_message(node_id, text) — основной метод
+    2. cardinal.account.send_message(node_id, text) — альтернатива
+    3. Через runner: cardinal.runner.send_message(node_id, text)
+
+    chat_id здесь = node_id чата FunPay (int).
+    buyer_username используется как fallback для поиска чата.
+    """
     if CTX.cardinal is None:
         return
-    try:
-        CTX.cardinal.send_message(chat_id, text, buyer_username)
-    except Exception as ex:
-        logger.warning("send_message failed: %s", ex)
+    node_id = chat_id
+
+    # Если chat_id=0 или None, но есть buyer_username — пробуем найти чат
+    if not node_id and buyer_username:
+        node_id = _find_chat_node_by_username(buyer_username)
+    if not node_id:
+        logger.warning("send_buyer_message: no valid node_id (chat_id=%s, user=%s)", chat_id, buyer_username)
+        return
+
+    # Пробуем разные способы отправки (FPC версии различаются)
+    sent = False
+
+    # Способ 1: cardinal.send_message(node_id, text)
+    if not sent and hasattr(CTX.cardinal, "send_message"):
+        try:
+            CTX.cardinal.send_message(int(node_id), text)
+            sent = True
+            logger.debug("sent via cardinal.send_message to node %s", node_id)
+        except TypeError:
+            # Может быть другая сигнатура — пробуем с 3 аргументами
+            try:
+                CTX.cardinal.send_message(int(node_id), text, buyer_username)
+                sent = True
+            except Exception as ex2:
+                logger.debug("cardinal.send_message(3 args) failed: %s", ex2)
+        except Exception as ex:
+            logger.debug("cardinal.send_message failed: %s", ex)
+
+    # Способ 2: через account
+    if not sent and hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "send_message"):
+        try:
+            CTX.cardinal.account.send_message(int(node_id), text)
+            sent = True
+            logger.debug("sent via cardinal.account.send_message to node %s", node_id)
+        except Exception as ex:
+            logger.debug("cardinal.account.send_message failed: %s", ex)
+
+    # Способ 3: через runner
+    if not sent and hasattr(CTX.cardinal, "runner") and hasattr(CTX.cardinal.runner, "send_message"):
+        try:
+            CTX.cardinal.runner.send_message(int(node_id), text)
+            sent = True
+            logger.debug("sent via cardinal.runner.send_message to node %s", node_id)
+        except Exception as ex:
+            logger.debug("cardinal.runner.send_message failed: %s", ex)
+
+    # Способ 4: через FunPayAPI напрямую
+    if not sent and hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "runner"):
+        runner = CTX.cardinal.account.runner
+        if hasattr(runner, "send_message"):
+            try:
+                runner.send_message(int(node_id), text)
+                sent = True
+                logger.debug("sent via account.runner.send_message to node %s", node_id)
+            except Exception as ex:
+                logger.debug("account.runner.send_message failed: %s", ex)
+
+    if not sent:
+        logger.error("send_buyer_message: ALL methods failed for node_id=%s, text=%s", node_id, text[:50])
+        notify_tg(f"⚠️ Не удалось отправить сообщение покупателю (node={node_id}):\n<code>{html_escape(text[:200])}</code>")
+
+
+def _find_chat_node_by_username(username: str) -> int | None:
+    """Пытается найти node_id чата по имени пользователя."""
+    if not username or CTX.cardinal is None:
+        return None
+    # Способ 1: через get_chat_by_name
+    if hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "get_chat_by_name"):
+        try:
+            chat = CTX.cardinal.account.get_chat_by_name(username)
+            if chat and hasattr(chat, "id"):
+                return int(chat.id)
+            if chat and hasattr(chat, "node_id"):
+                return int(chat.node_id)
+        except Exception as ex:
+            logger.debug("get_chat_by_name(%s) failed: %s", username, ex)
+    # Способ 2: поиск в chats_list
+    if hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "chats"):
+        try:
+            for chat in CTX.cardinal.account.chats.values():
+                if getattr(chat, "name", "") == username or getattr(chat, "username", "") == username:
+                    return int(getattr(chat, "id", 0) or getattr(chat, "node_id", 0))
+        except Exception:
+            pass
+    return None
 
 
 def notify_tg(text: str, parse_mode: str = "HTML") -> None:
@@ -1134,17 +1253,51 @@ def on_new_order(c: "Cardinal", e: "NewOrderEvent", *args) -> None:
         return
     order = e.order
     try:
-        lot = CTX.storage.find_lot_by_title(order.description)
+        # Пробуем найти лот: сначала по lot_id (если FPC передаёт), потом по описанию
+        lot = None
+        lot_id = getattr(order, "lot_id", None) or getattr(order, "subcategory_id", None)
+        if lot_id and int(lot_id) in CTX.storage.lots:
+            lot = CTX.storage.lots[int(lot_id)]
+        if not lot:
+            lot = CTX.storage.find_lot_by_title(getattr(order, "description", "") or "")
         if not lot or not lot.active:
             return
         service = CTX.api.find_service(lot.service_id) if CTX.api else None
         if not service:
-            notify_tg(f"⚠️ SMMWay: услуга #{lot.service_id} не найдена в каталоге, заказ {order.id} пропущен.")
+            notify_tg(f"⚠️ Услуга #{lot.service_id} не найдена в каталоге, заказ {order.id} пропущен.")
+            return
+
+        # --- Получаем данные покупателя ---
+        buyer_username = getattr(order, "buyer_username", "") or getattr(order, "buyer_name", "") or ""
+        buyer_id = getattr(order, "buyer_id", 0) or getattr(order, "buyer_node_id", 0) or 0
+
+        # В FPC объект order НЕ содержит chat_id напрямую.
+        # node_id чата получаем: 1) из event, 2) из order, 3) ищем по username
+        chat_id = (
+            getattr(e, "chat_id", None)
+            or getattr(order, "chat_id", None)
+            or getattr(order, "node_id", None)
+            or getattr(order, "buyer_chat_id", None)
+            or 0
+        )
+
+        # Если chat_id не найден — ищем по buyer_username
+        if not chat_id and buyer_username:
+            chat_id = _find_chat_node_by_username(buyer_username) or 0
+
+        # Последний fallback — buyer_id может быть node_id чата
+        if not chat_id:
+            chat_id = buyer_id
+
+        if not chat_id:
+            logger.error("on_new_order: cannot determine chat for order %s (buyer=%s)", 
+                        getattr(order, "id", "?"), buyer_username)
+            notify_tg(
+                f"⚠️ SMMWay: заказ {getattr(order, 'id', '?')} — не удалось найти чат покупателя "
+                f"({buyer_username}). Сообщение не отправлено."
+            )
             return
         # Save order, request link from buyer.
-        # Сразу фиксируем сколько заплатил покупатель на FunPay (₽) и
-        # сколько потратим на smmway за этот объём — пригодится для
-        # уведомления о запуске бота, истории и расчёта прибыли.
         try:
             fp_price = float(getattr(order, "price", 0) or 0)
         except (TypeError, ValueError):
@@ -1163,9 +1316,9 @@ def on_new_order(c: "Cardinal", e: "NewOrderEvent", *args) -> None:
             funpay_order_id=order.id,
             funpay_lot_id=lot.funpay_lot_id,
             service_id=lot.service_id,
-            buyer_username=order.buyer_username,
-            buyer_id=order.buyer_id,
-            chat_id=order.chat_id,
+            buyer_username=buyer_username,
+            buyer_id=buyer_id,
+            chat_id=chat_id,
             quantity=qty,
             status="awaiting_link",
             funpay_price=fp_price,
@@ -1175,17 +1328,24 @@ def on_new_order(c: "Cardinal", e: "NewOrderEvent", *args) -> None:
         CTX.storage.add_order(entry)
         # ask link
         msg = CTX.storage.templates["msg_await_link"]
-        send_buyer_message(order.chat_id, msg, order.buyer_username)
+        send_buyer_message(chat_id, msg, buyer_username)
+        # Сохраняем state и по buyer_id, и по chat_id — при получении ответа
+        # от покупателя в on_new_message ищем по обоим ключам
         CTX.buyer_state.set_awaiting_link(
-            order.buyer_id, order.id, lot, entry.quantity, order.chat_id
+            buyer_id, order.id, lot, entry.quantity, chat_id
         )
+        if chat_id and chat_id != buyer_id:
+            CTX.buyer_state.set_awaiting_link(
+                chat_id, order.id, lot, entry.quantity, chat_id
+            )
         if CTX.storage.cfg.get("notify_balance_before"):
             try:
                 bal = CTX.api.balance()
                 notify_tg(f"💰 SMMWay баланс до создания заказа: <code>{bal:.4f}</code> ₽")
             except Exception:
                 pass
-        logger.info("new order %s queued for service %s", order.id, lot.service_id)
+        logger.info("new order %s: chat_id=%s, buyer_id=%s, buyer=%s, service=%s",
+                    order.id, chat_id, buyer_id, buyer_username, lot.service_id)
     except Exception:
         logger.exception("on_new_order failed for order %s", getattr(order, "id", "?"))
 
@@ -1211,21 +1371,60 @@ def on_new_message(c: "Cardinal", e: "NewMessageEvent", *args) -> None:
     text = (msg.text or "").strip()
     if not text:
         return
-    # status query?
-    if text.lower() in ("статус", "status", "/status", "/статус"):
+    # Chat commands (with ! prefix)
+    text_lower = text.lower()
+    if text_lower in ("!статус", "!status"):
+        _handle_status_command(c, msg)
+        return
+    if text_lower in ("!рефилл", "!refill"):
+        _handle_refill_command(c, msg)
+        return
+    if text_lower in ("!отмена", "!cancel"):
+        _handle_cancel_command(c, msg)
+        return
+    # status query? (backward compat without ! prefix)
+    if text_lower in ("статус", "status", "/status", "/статус"):
         _handle_status_query(c, msg)
         return
     # waiting for link?
     buyer_id = getattr(msg, "author_id", None)
-    if buyer_id is None:
+    chat_id = getattr(msg, "chat_id", None)
+    if buyer_id is None and chat_id is None:
         return
-    state = CTX.buyer_state.get(buyer_id)
+    # Атомарно забираем state (pop) — если кто-то уже забрал, получим None.
+    # Это предотвращает обработку второй ссылки от того же покупателя.
+    state = None
+    if buyer_id is not None:
+        state = CTX.buyer_state.pop_awaiting_link(buyer_id)
+    if not state and chat_id is not None:
+        state = CTX.buyer_state.pop_awaiting_link(chat_id)
     if not state or state.get("type") != "awaiting_link":
         return
+    # Дополнительно удаляем второй ключ (если state был по обоим)
+    if state and buyer_id is not None:
+        CTX.buyer_state.pop_awaiting_link(buyer_id)
+    if state and chat_id is not None:
+        CTX.buyer_state.pop_awaiting_link(chat_id)
+    # Проверяем, что заказ в storage ещё ждёт ссылку (не обработан другим потоком)
+    funpay_order_id = state.get("funpay_order_id")
+    if funpay_order_id:
+        order_entry = CTX.storage.orders.get(funpay_order_id)
+        if order_entry and order_entry.status != "awaiting_link":
+            # Заказ уже обработан — игнорируем повторную ссылку
+            logger.debug("ignoring duplicate link for order %s (status=%s)",
+                        funpay_order_id, order_entry.status)
+            return
     link = parse_link_or_username(text)
     if not link:
+        # State уже удалён, но ссылка не распознана — возвращаем state обратно
+        CTX.buyer_state.set_awaiting_link(
+            buyer_id or chat_id,
+            state["funpay_order_id"],
+            state["lot_entry"],
+            state["quantity"],
+            state["chat_id"],
+        )
         return
-    CTX.buyer_state.pop_awaiting_link(buyer_id)
     _process_smm_order(state, link)
 
 
@@ -1329,6 +1528,212 @@ def _maybe_place_review_bonus(o: OrderEntry, stars: int) -> None:
         )
 
 
+def _handle_status_command(c: "Cardinal", msg) -> None:
+    """Handle !статус / !status - show detailed order info."""
+    buyer_id = getattr(msg, "author_id", None)
+    chat_id = getattr(msg, "chat_id", None)
+    if buyer_id is None or chat_id is None:
+        return
+    # Find latest order for this buyer
+    found = None
+    for o in CTX.storage.orders.values():
+        if o.buyer_id == buyer_id:
+            if found is None or o.created_at > found.created_at:
+                found = o
+    if not found:
+        send_buyer_message(chat_id, "У вас пока нет заказов.", getattr(msg, "author", ""))
+        return
+    if not found.smm_order_id:
+        send_buyer_message(
+            chat_id,
+            f"Заказ ещё не запущен.\nСтатус: {found.status}",
+            getattr(msg, "author", ""),
+        )
+        return
+    # Get fresh status from SMM API
+    try:
+        status_data = CTX.api.order_status(found.smm_order_id)
+    except Exception as ex:
+        logger.warning("status command API error: %s", ex)
+        send_buyer_message(
+            chat_id,
+            f"📊 Статус заказа: {found.smm_status_raw or found.status}\n"
+            f"(не удалось получить актуальные данные)",
+            getattr(msg, "author", ""),
+        )
+        return
+    status = str(status_data.get("status", found.smm_status_raw or found.status))
+    start_count = status_data.get("start_count", "?")
+    remains = status_data.get("remains", "?")
+    # Estimate time remaining
+    time_info = ""
+    try:
+        from datetime import datetime as _dt
+        created = _dt.fromisoformat(found.created_at.replace("Z", "+00:00"))
+        now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+        elapsed_sec = (now - created).total_seconds()
+        if isinstance(remains, (int, float)) and isinstance(start_count, (int, float)):
+            done = int(start_count) + found.quantity - int(remains)
+            if done > 0 and int(remains) > 0:
+                rate_per_sec = done / max(elapsed_sec, 1)
+                eta_sec = int(int(remains) / rate_per_sec)
+                if eta_sec < 3600:
+                    time_info = f"\n⏱ Ориентировочно осталось: ~{eta_sec // 60} мин."
+                else:
+                    time_info = f"\n⏱ Ориентировочно осталось: ~{eta_sec // 3600} ч. {(eta_sec % 3600) // 60} мин."
+    except Exception:
+        pass
+    reply = (
+        f"📊 Подробный статус заказа\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 Статус: {status}\n"
+        f"📐 Начальный счётчик: {start_count}\n"
+        f"📉 Осталось: {remains}\n"
+        f"📦 Заказано: {found.quantity}"
+        f"{time_info}"
+    )
+    send_buyer_message(chat_id, reply, getattr(msg, "author", ""))
+
+
+def _handle_refill_command(c: "Cardinal", msg) -> None:
+    """Handle !рефилл / !refill - request re-order for completed service."""
+    buyer_id = getattr(msg, "author_id", None)
+    chat_id = getattr(msg, "chat_id", None)
+    if buyer_id is None or chat_id is None:
+        return
+    # Find latest completed order for this buyer
+    found = None
+    for o in CTX.storage.orders.values():
+        if o.buyer_id == buyer_id and o.status == "completed" and o.smm_order_id:
+            if found is None or o.created_at > found.created_at:
+                found = o
+    if not found:
+        send_buyer_message(chat_id, "Не найден завершённый заказ для рефилла.", getattr(msg, "author", ""))
+        return
+    # Check if service supports refill
+    service = CTX.api.find_service(found.service_id) if CTX.api else None
+    if not service or not service.get("refill"):
+        send_buyer_message(
+            chat_id,
+            "К сожалению, эта услуга не поддерживает рефилл (повторную накрутку).",
+            getattr(msg, "author", ""),
+        )
+        return
+    # Call refill API
+    try:
+        result = CTX.api.refill(found.smm_order_id)
+        refill_id = result.get("refill") or result.get("result") or ""
+        send_buyer_message(
+            chat_id,
+            f"♻️ Рефилл запрошен!\n"
+            f"Повторная накрутка будет запущена автоматически.",
+            getattr(msg, "author", ""),
+        )
+        notify_tg(
+            f"♻️ Рефилл по запросу покупателя\n"
+            f"FP: <code>#{found.funpay_order_id}</code>\n"
+            f"SMM: <code>#{found.smm_order_id}</code>\n"
+            f"Refill ID: <code>{refill_id}</code>"
+        )
+    except SMMWayError as ex:
+        logger.warning("refill command failed for order %s: %s", found.smm_order_id, ex)
+        send_buyer_message(
+            chat_id,
+            f"⚠️ Не удалось запросить рефилл: {ex}",
+            getattr(msg, "author", ""),
+        )
+
+
+def _handle_cancel_command(c: "Cardinal", msg) -> None:
+    """Handle !отмена / !cancel - cancel active order."""
+    buyer_id = getattr(msg, "author_id", None)
+    chat_id = getattr(msg, "chat_id", None)
+    if buyer_id is None or chat_id is None:
+        return
+    # Find latest active (non-completed) order for this buyer
+    found = None
+    for o in CTX.storage.orders.values():
+        if o.buyer_id == buyer_id and o.smm_order_id:
+            if o.status == "completed":
+                continue
+            if found is None or o.created_at > found.created_at:
+                found = o
+    if not found:
+        # Check if latest order is completed
+        latest = None
+        for o in CTX.storage.orders.values():
+            if o.buyer_id == buyer_id:
+                if latest is None or o.created_at > latest.created_at:
+                    latest = o
+        if latest and latest.status == "completed":
+            send_buyer_message(
+                chat_id,
+                "Завершённые заказы не могут быть отменены.",
+                getattr(msg, "author", ""),
+            )
+        else:
+            send_buyer_message(chat_id, "Не найден активный заказ для отмены.", getattr(msg, "author", ""))
+        return
+    if found.status == "completed":
+        send_buyer_message(
+            chat_id,
+            "Завершённые заказы не могут быть отменены.",
+            getattr(msg, "author", ""),
+        )
+        return
+    # Refresh status before cancel to avoid cancelling completed orders
+    try:
+        fresh_status = CTX.api.order_status(found.smm_order_id)
+        fresh_raw = (fresh_status.get("status") or "").lower()
+        if fresh_raw in ("completed", "complete", "completed_partial"):
+            CTX.storage.update_order(found.funpay_order_id, status="completed", smm_status_raw=fresh_raw)
+            send_buyer_message(chat_id, "Завершённые заказы не могут быть отменены.", getattr(msg, "author", ""))
+            return
+    except Exception:
+        pass  # proceed with cancel attempt even if status check fails
+    # Call cancel API
+    try:
+        result = CTX.api.cancel(found.smm_order_id)
+        # Check if cancellation was successful
+        cancel_status = result.get("status") or result.get("cancel") or ""
+        # Determine if refund happened on SMM side
+        refunded = False
+        # Check for explicit refund confirmation from API
+        if result.get("refund"):
+            refunded = True
+        elif isinstance(cancel_status, str) and cancel_status.lower() in ("cancelled", "canceled"):
+            refunded = True
+        status_msg = f"✅ Заказ отменён."
+        if refunded:
+            status_msg += "\n💰 Средства возвращены."
+            # Attempt FunPay refund
+            try:
+                if hasattr(c, "account") and hasattr(c.account, "refund"):
+                    c.account.refund(found.funpay_order_id)
+                    status_msg += "\n💸 Возврат на FunPay инициирован."
+            except Exception as refund_ex:
+                logger.warning("FunPay refund failed for %s: %s", found.funpay_order_id, refund_ex)
+                status_msg += "\n⚠️ Автоматический возврат на FunPay не удался, обратитесь к продавцу."
+        else:
+            status_msg += "\n⚠️ Платформа не подтвердила возврат средств."
+        CTX.storage.update_order(found.funpay_order_id, status="refunded" if refunded else "error",
+                                 smm_status_raw="Cancelled")
+        send_buyer_message(chat_id, status_msg, getattr(msg, "author", ""))
+        notify_tg(
+            f"⛔ Отмена заказа по запросу покупателя\n"
+            f"FP: <code>#{found.funpay_order_id}</code>\n"
+            f"SMM: <code>#{found.smm_order_id}</code>\n"
+            f"Возврат: {'Да' if refunded else 'Нет'}"
+        )
+    except SMMWayError as ex:
+        logger.warning("cancel command failed for order %s: %s", found.smm_order_id, ex)
+        send_buyer_message(
+            chat_id,
+            f"⚠️ Не удалось отменить заказ: {ex}",
+            getattr(msg, "author", ""),
+        )
+
+
 def _handle_status_query(c: "Cardinal", msg) -> None:
     buyer_id = getattr(msg, "author_id", None)
     chat_id = getattr(msg, "chat_id", None)
@@ -1344,7 +1749,10 @@ def _handle_status_query(c: "Cardinal", msg) -> None:
         return
     status_text = found.smm_status_raw or found.status
     template = CTX.storage.templates["msg_status_reply"]
-    reply = template.format(smm_id=found.smm_order_id, status=status_text)
+    try:
+        reply = template.format(smm_id=found.smm_order_id, status=status_text)
+    except KeyError:
+        reply = template.format(status=status_text)
     send_buyer_message(chat_id, reply, getattr(msg, "author", ""))
 
 
@@ -1410,13 +1818,52 @@ def _format_order_started_notification(
     )
 
 
+# Категории услуг, которые требуют дополнительных параметров при заказе.
+# Ключ — подстрока в имени/категории услуги (lower), значение — dict доп. полей.
+# Некоторые SMM-платформы требуют, например, "runs" для Twitch viewers (сколько
+# минут стрима), "delay" для отложенных заказов и т.д.
+_SERVICE_EXTRA_PARAMS: list[tuple[list[str], dict[str, str]]] = [
+    # Twitch viewers (зрители стрима) — обычно требует "runs" (минуты просмотра)
+    (["twitch", "зрител", "viewer", "live viewer"], {"runs": "60"}),
+    # Twitch chat — иногда требует "runs"
+    (["twitch", "чат", "chat"], {"runs": "30"}),
+]
+
+
+def _build_extra_params(service: dict, link: str, quantity: int) -> dict | None:
+    """Определяет дополнительные параметры для заказа на SMM-платформе.
+
+    Некоторые услуги (Twitch viewers, стримы) требуют доп. полей (runs, delay и т.д.).
+    Возвращает dict с доп. параметрами или None, если они не нужны.
+    """
+    if not service:
+        return None
+    hay = _service_haystack(service)
+    for keywords, extra in _SERVICE_EXTRA_PARAMS:
+        # Все ключевые слова группы должны присутствовать
+        if all(kw in hay for kw in keywords):
+            return extra.copy()
+    return None
+
+
 def _process_smm_order(state: dict, link: str) -> None:
     lot: LotEntry = state["lot_entry"]
     quantity: int = state["quantity"]
     chat_id = state["chat_id"]
     funpay_order_id = state["funpay_order_id"]
+
+    # Финальная проверка: заказ ещё ждёт ссылку? (защита от дублей)
+    order_entry = CTX.storage.orders.get(funpay_order_id)
+    if order_entry and order_entry.status != "awaiting_link":
+        logger.warning("_process_smm_order: order %s already in status '%s', skipping duplicate",
+                       funpay_order_id, order_entry.status)
+        return
+
     try:
-        smm_id = CTX.api.add_order(lot.service_id, link, quantity)
+        # Определяем доп. параметры для услуги (Twitch viewers/стримы и т.д.)
+        service = CTX.api.find_service(lot.service_id) if CTX.api else None
+        extra = _build_extra_params(service, link, quantity) if service else None
+        smm_id = CTX.api.add_order(lot.service_id, link, quantity, extra=extra)
         CTX.storage.update_order(
             funpay_order_id,
             smm_order_id=smm_id,
@@ -1452,9 +1899,12 @@ def _process_smm_order(state: dict, link: str) -> None:
         CTX.storage.stats["spent_rub"] = round(
             float(CTX.storage.stats.get("spent_rub", 0.0)) + smmway_charge, 4
         )
-        msg = CTX.storage.templates["msg_order_created"].format(
-            smm_id=smm_id, qty=quantity
-        )
+        try:
+            msg = CTX.storage.templates["msg_order_created"].format(
+                smm_id=smm_id, qty=quantity
+            )
+        except KeyError:
+            msg = CTX.storage.templates["msg_order_created"].format(qty=quantity)
         send_buyer_message(chat_id, msg)
         if CTX.storage.cfg.get("notify_order_created"):
             notify_tg(_format_order_started_notification(
@@ -1475,24 +1925,143 @@ def _process_smm_order(state: dict, link: str) -> None:
             except Exception:
                 pass
     except SMMWayError as ex:
+        # --- Авто-повтор при ошибке ---
+        if CTX.storage.cfg.get("auto_retry_on_error", True):
+            retry_result = _retry_order_on_error(lot, link, quantity, funpay_order_id, chat_id, ex)
+            if retry_result:
+                # Повтор удался — выходим
+                return
+        # Повтор не помог или выключен — стандартная обработка ошибки
         CTX.storage.update_order(funpay_order_id, status="error", error=str(ex))
         CTX.storage.stats["failed"] += 1
-        err_msg = CTX.storage.templates["msg_order_error"].format(reason=str(ex))
+        err_msg = CTX.storage.templates["msg_order_error"].format(reason="Услуга временно недоступна")
         send_buyer_message(chat_id, err_msg)
         if CTX.storage.cfg.get("notify_order_error"):
             notify_tg(
-                f"❌ SMMWay ошибка\n"
+                f"❌ Ошибка заказа\n"
                 f"FP: <code>#{funpay_order_id}</code>\n"
                 f"Услуга: <code>{lot.service_id}</code>\n"
                 f"Ссылка: <code>{html_escape(link)}</code>\n"
                 f"Причина: <code>{html_escape(str(ex))}</code>"
             )
-        # Try refund
+        # Возврат денег покупателю
         try:
             CTX.cardinal.account.refund(funpay_order_id)
-            notify_tg(f"💸 Возврат FP-заказа <code>#{funpay_order_id}</code> выполнен автоматически.")
+            notify_tg(f"💸 Возврат FP-заказа <code>#{funpay_order_id}</code> выполнен.")
         except Exception as rex:
             logger.warning("refund failed for %s: %s", funpay_order_id, rex)
+        # Блокируем услугу и заменяем лот
+        if CTX.storage.cfg.get("auto_retry_on_error", True):
+            _blacklist_and_replace_lot(lot)
+
+
+def _retry_order_on_error(lot: LotEntry, link: str, quantity: int,
+                           funpay_order_id: str, chat_id, original_error) -> bool:
+    """Пробует повторить заказ после ошибки.
+
+    1. Проверяет валидность ссылки (формат)
+    2. Проверяет баланс на SMM-платформе
+    3. Пробует заказ ещё раз
+
+    Возвращает True если повтор удался.
+    """
+    max_attempts = int(CTX.storage.cfg.get("auto_retry_max_attempts", 2))
+
+    # Проверка 1: ссылка валидна?
+    if not link or not (link.startswith("http") or re.match(r"^[A-Za-z0-9_.]{3,}$", link)):
+        logger.info("retry: link invalid, skipping retry: %s", link)
+        return False
+
+    # Проверка 2: баланс достаточен?
+    try:
+        service = CTX.api.find_service(lot.service_id)
+        if service:
+            rate_per_1000 = float(service.get("rate") or service.get("price") or 0)
+            needed = rate_per_1000 * quantity / 1000.0
+            balance = CTX.api.balance()
+            if balance < needed:
+                logger.info("retry: balance %.4f < needed %.4f, skipping", balance, needed)
+                notify_tg(f"⚠️ Повтор заказа невозможен: баланс ({balance:.4f}) меньше стоимости ({needed:.4f})")
+                return False
+    except Exception as ex:
+        logger.warning("retry: balance check failed: %s", ex)
+
+    # Проверка 3: услуга не в чёрном списке?
+    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+    if lot.service_id in blacklist:
+        logger.info("retry: service %s is blacklisted, skipping", lot.service_id)
+        return False
+
+    # Пробуем повторить
+    for attempt in range(1, max_attempts + 1):
+        try:
+            time.sleep(2 * attempt)  # пауза перед повтором
+            service = CTX.api.find_service(lot.service_id) if CTX.api else None
+            extra = _build_extra_params(service, link, quantity) if service else None
+            smm_id = CTX.api.add_order(lot.service_id, link, quantity, extra=extra)
+            # Успех!
+            CTX.storage.update_order(
+                funpay_order_id,
+                smm_order_id=smm_id,
+                link=link,
+                status="created",
+            )
+            CTX.storage.stats["sent"] += 1
+            try:
+                msg = CTX.storage.templates["msg_order_created"].format(smm_id=smm_id, qty=quantity)
+            except KeyError:
+                msg = CTX.storage.templates["msg_order_created"].format(qty=quantity)
+            send_buyer_message(chat_id, msg)
+            notify_tg(f"✅ Повтор заказа #{funpay_order_id} удался с попытки {attempt}")
+            return True
+        except SMMWayError as ex:
+            logger.warning("retry attempt %d/%d failed for order %s: %s",
+                          attempt, max_attempts, funpay_order_id, ex)
+            continue
+
+    # Все попытки исчерпаны
+    return False
+
+
+def _blacklist_and_replace_lot(lot: LotEntry) -> None:
+    """Блокирует услугу (добавляет в чёрный список), деактивирует лот и пытается заменить."""
+    service_id = lot.service_id
+
+    # Добавляем в чёрный список
+    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+    if service_id not in blacklist:
+        blacklist.append(service_id)
+        CTX.storage.cfg["blacklisted_services"] = blacklist
+        CTX.storage.save_config()
+        logger.info("service %s added to blacklist", service_id)
+
+    # Деактивируем лот
+    lot.active = False
+    CTX.storage.save_lots()
+
+    # Пробуем заменить другой услугой (если функция потеряшка включена)
+    if CTX.storage.cfg.get("auto_replace_missing_service"):
+        try:
+            services_map = {str(s.get("service")): s for s in CTX.api.services()}
+            # Исключаем заблокированные
+            for bl_id in blacklist:
+                services_map.pop(str(bl_id), None)
+            replacement = _pick_replacement_service(lot, services_map)
+            if replacement:
+                success = _replace_lot_inplace(lot, replacement)
+                if success:
+                    notify_tg(
+                        f"🔄 Услуга <code>#{service_id}</code> заблокирована.\n"
+                        f"Лот заменён на услугу <code>#{replacement.get('service')}</code>."
+                    )
+                    return
+        except Exception as ex:
+            logger.warning("blacklist replace failed: %s", ex)
+
+    notify_tg(
+        f"⛔ Услуга <code>#{service_id}</code> заблокирована и лот деактивирован.\n"
+        f"Замена не найдена."
+    )
 
 
 # =============================================================================
@@ -1527,7 +2096,8 @@ def status_poller_loop() -> None:
                                              last_check_at=_now_iso())
                     CTX.storage.stats["completed"] += 1
                     send_buyer_message(o.chat_id,
-                                       CTX.storage.templates["msg_order_completed"])
+                                       CTX.storage.templates["msg_order_completed"],
+                                       o.buyer_username)
                     # Ответ на отзыв шлём при событии отзыва (см. _maybe_process_review),
                     # а не здесь — иначе будет ошибка "review not yet left by buyer".
                 elif status_raw in ("canceled", "cancelled", "partial"):
@@ -1574,7 +2144,7 @@ def update_all_prices(force: bool = False) -> tuple[int, int]:
     services = {str(s.get("service")): s for s in CTX.api.services()}
     global_markup = CTX.storage.cfg.get("global_markup_pct", 55.0)
     rate = CTX.storage.cfg.get("currency_rate_rub_to_fp", 1.0)
-    min_price = CTX.storage.cfg.get("min_lot_price", 0.0)
+    min_price = CTX.storage.cfg.get("min_lot_price", 1.0)
     jump_cap = CTX.storage.cfg.get("auto_price_jump_cap_pct", 200.0) / 100.0
     for lot in list(CTX.storage.lots.values()):
         if not lot.active:
@@ -1598,7 +2168,19 @@ def update_all_prices(force: bool = False) -> tuple[int, int]:
             updated += 1
             time.sleep(1.5)  # rate limit FP
         except Exception as ex:
-            logger.warning("price update failed for lot %s: %s", lot.funpay_lot_id, ex)
+            # Если не получилось выставить — пробуем цену 1
+            logger.warning("price update failed for lot %s (price=%.6f): %s — retrying with price=1",
+                           lot.funpay_lot_id, new_price, ex)
+            try:
+                fields = CTX.cardinal.account.get_lot_fields(lot.funpay_lot_id)
+                fields.price = 1.0
+                CTX.cardinal.account.save_lot(fields)
+                lot.last_price_fp = 1.0
+                updated += 1
+                time.sleep(1.5)
+            except Exception as ex2:
+                logger.warning("price update failed for lot %s even with price=1: %s",
+                               lot.funpay_lot_id, ex2)
     if updated:
         CTX.storage.save_lots()
     return updated, total
@@ -1672,7 +2254,7 @@ def _replace_lot_inplace(lot: LotEntry, new_service: dict) -> bool:
     desc_en = _sanitize_en(desc_en, kind="desc", service=new_service)
     markup = lot.markup_pct if lot.markup_pct is not None else CTX.storage.cfg.get("global_markup_pct", 55.0)
     rate = CTX.storage.cfg.get("currency_rate_rub_to_fp", 1.0)
-    min_price = CTX.storage.cfg.get("min_lot_price", 0.0)
+    min_price = CTX.storage.cfg.get("min_lot_price", 1.0)
     price = compute_fp_price(new_service, markup_pct=markup, rate=rate, min_price=min_price)
     patch = {
         "fields[summary][ru]": title_ru[:80],
@@ -1692,8 +2274,22 @@ def _replace_lot_inplace(lot: LotEntry, new_service: dict) -> bool:
         fields.price = price
         CTX.cardinal.account.save_lot(fields)
     except Exception as ex:
-        logger.warning("replace lot %s: save_lot failed: %s", lot.funpay_lot_id, ex)
-        return False
+        # Если не получилось — пробуем цену 1
+        logger.warning("replace lot %s: save_lot failed (price=%.6f): %s — retrying with price=1",
+                       lot.funpay_lot_id, price, ex)
+        try:
+            price = 1.0
+            patch["price"] = f"{price:.4f}"
+            if hasattr(fields, "edit_fields"):
+                fields.edit_fields(patch)
+            else:
+                fields.fields.update(patch)
+            fields.price = price
+            CTX.cardinal.account.save_lot(fields)
+        except Exception as ex2:
+            logger.warning("replace lot %s: save_lot failed even with price=1: %s",
+                           lot.funpay_lot_id, ex2)
+            return False
     # Обновляем привязку в storage
     CTX.storage.unbind_lot(lot.funpay_lot_id)
     new_lot = LotEntry(
@@ -2570,6 +3166,7 @@ def main_menu_kb():
         B("🔑 API ключ", callback_data=f"{CB}:apikey"),
     )
     kb.add(B("📋 Заказы", callback_data=f"{CB}:orders:0"))
+    kb.add(B("⚙️ Настройки", callback_data=f"{CB}:settings"))
     kb.add(B("❤️ Health-check", callback_data=f"{CB}:health"))
     kb.add(B("🔄 Обновить", callback_data=f"{CB}:main"))
     return kb
@@ -2686,6 +3283,42 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
                 return
             if data == f"{CB}:health":
                 _show_health(c)
+                return
+            if data == f"{CB}:settings":
+                _show_settings_menu(c)
+                return
+            if data == f"{CB}:settings_toggle_retry":
+                CTX.storage.cfg["auto_retry_on_error"] = not CTX.storage.cfg.get("auto_retry_on_error", True)
+                CTX.storage.save_config()
+                _show_settings_menu(c)
+                return
+            if data == f"{CB}:settings_reset_blacklist":
+                CTX.storage.cfg["blacklisted_services"] = []
+                CTX.storage.save_config()
+                bot.answer_callback_query(c.id, "Чёрный список сброшен!")
+                _show_settings_menu(c)
+                return
+            if data.startswith(f"{CB}:bl_remove:"):
+                # Удаление конкретного ID из чёрного списка
+                try:
+                    sid = int(data.split(":")[2])
+                    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+                    if sid in blacklist:
+                        blacklist.remove(sid)
+                        CTX.storage.cfg["blacklisted_services"] = blacklist
+                        CTX.storage.save_config()
+                        bot.answer_callback_query(c.id, f"Услуга #{sid} удалена из чёрного списка")
+                    else:
+                        bot.answer_callback_query(c.id, f"#{sid} не в списке")
+                except (ValueError, IndexError):
+                    bot.answer_callback_query(c.id, "Ошибка")
+                _show_settings_menu(c)
+                return
+            if data == f"{CB}:bl_remove_manual":
+                bot.send_message(c.message.chat.id,
+                                 "Введи ID услуги (или несколько через запятую/пробел) для удаления из чёрного списка:")
+                _set_state(c.from_user.id, kind="bl_remove_ids")
+                bot.answer_callback_query(c.id)
                 return
             if data == f"{CB}:apikey":
                 _show_apikey_menu(c)
@@ -2872,6 +3505,35 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
                 bot.reply_to(m, f"Привязано: лот #{lot_id} ↔ услуга #{service_id}")
             elif kind == "autolots_ids":
                 _run_autolots(m, m.text)
+            elif kind == "bl_remove_ids":
+                # Удаление ID из чёрного списка вручную
+                raw = m.text.strip()
+                ids_to_remove = []
+                for token in re.split(r"[,\s;]+", raw):
+                    token = token.strip()
+                    if token.isdigit():
+                        ids_to_remove.append(int(token))
+                if not ids_to_remove:
+                    bot.reply_to(m, "Не найдено ни одного числового ID. Введи числа через запятую или пробел.")
+                    return
+                blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+                removed = []
+                not_found = []
+                for sid in ids_to_remove:
+                    if sid in blacklist:
+                        blacklist.remove(sid)
+                        removed.append(str(sid))
+                    else:
+                        not_found.append(str(sid))
+                CTX.storage.cfg["blacklisted_services"] = blacklist
+                CTX.storage.save_config()
+                reply_parts = []
+                if removed:
+                    reply_parts.append(f"✅ Удалены из чёрного списка: {', '.join(removed)}")
+                if not_found:
+                    reply_parts.append(f"⚠️ Не были в списке: {', '.join(not_found)}")
+                reply_parts.append(f"Осталось в списке: {len(blacklist)} шт.")
+                bot.reply_to(m, "\n".join(reply_parts))
         except Exception as ex:
             bot.reply_to(m, f"Ошибка: {ex}")
             logger.exception("on_state_message failed")
@@ -2897,6 +3559,62 @@ def _set_state(tg_user_id: int, **kwargs):
 
 
 # --- submenus ---
+
+
+def _show_settings_menu(c):
+    """Показывает меню настроек плагина."""
+    bot = CTX.cardinal.telegram.bot
+    K, B = _kbd()
+
+    retry_enabled = CTX.storage.cfg.get("auto_retry_on_error", True)
+    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+    max_attempts = CTX.storage.cfg.get("auto_retry_max_attempts", 2)
+
+    lines = [
+        "<b>⚙️ Настройки</b>",
+        "",
+        f"<b>🔄 Авто-повтор при ошибке:</b> {'🟢 Вкл' if retry_enabled else '🔴 Выкл'}",
+        f"   Попыток: {max_attempts}",
+        "",
+        f"<b>🚫 Чёрный список услуг:</b> {len(blacklist)} шт.",
+    ]
+    if blacklist:
+        lines.append("   Нажми на ID чтобы убрать из списка:")
+        for sid in blacklist[:20]:
+            svc = CTX.api.find_service(sid) if CTX.api else None
+            name = (svc.get("name", "")[:30] if svc else "неизвестна")
+            lines.append(f"   • <code>{sid}</code> — {html_escape(name)}")
+        if len(blacklist) > 20:
+            lines.append(f"   ... и ещё {len(blacklist) - 20}")
+    lines.append("")
+    lines.append("<i>При ошибке заказа бот проверяет ссылку и баланс, "
+                 "пробует ещё раз. Если повторно ошибка — возврат денег, "
+                 "блокировка услуги и замена лота.</i>")
+    lines.append("")
+    lines.append("<i>Чтобы удалить конкретный ID — нажми кнопку ниже "
+                 "или отправь команду «Удалить ID» и введи номер.</i>")
+
+    kb = K(row_width=1)
+    kb.add(
+        B(("🟢" if retry_enabled else "🔴") + " Авто-повтор", callback_data=f"{CB}:settings_toggle_retry"),
+    )
+    # Кнопки для удаления отдельных услуг из чёрного списка (показываем до 10)
+    if blacklist:
+        row = []
+        for sid in blacklist[:10]:
+            row.append(B(f"❌ {sid}", callback_data=f"{CB}:bl_remove:{sid}"))
+            if len(row) == 3:
+                kb.row(*row)
+                row = []
+        if row:
+            kb.row(*row)
+        kb.add(B(f"🗑 Сбросить весь список ({len(blacklist)})", callback_data=f"{CB}:settings_reset_blacklist"))
+    kb.add(B("✏️ Удалить ID вручную", callback_data=f"{CB}:bl_remove_manual"))
+    kb.add(B("◀️ Меню", callback_data=f"{CB}:main"))
+
+    bot.edit_message_text("\n".join(lines), c.message.chat.id, c.message.id,
+                          reply_markup=kb, parse_mode="HTML")
+    bot.answer_callback_query(c.id)
 
 
 def _show_health(c):
@@ -3192,7 +3910,7 @@ def _run_autolots_body(m, text: str):
         return
     markup = CTX.storage.cfg.get("global_markup_pct", 55.0)
     rate = CTX.storage.cfg.get("currency_rate_rub_to_fp", 1.0)
-    min_price = CTX.storage.cfg.get("min_lot_price", 0.0)
+    min_price = CTX.storage.cfg.get("min_lot_price", 1.0)
     try:
         services_map = {str(s.get("service")): s for s in CTX.api.services()}
     except Exception as ex:
