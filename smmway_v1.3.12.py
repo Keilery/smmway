@@ -1134,12 +1134,103 @@ CTX = PluginContext()
 
 
 def send_buyer_message(chat_id: int | str, text: str, buyer_username: str = "") -> None:
+    """Отправляет сообщение покупателю в чат FunPay.
+
+    FPC Cardinal поддерживает несколько способов отправки:
+    1. cardinal.send_message(node_id, text) — основной метод
+    2. cardinal.account.send_message(node_id, text) — альтернатива
+    3. Через runner: cardinal.runner.send_message(node_id, text)
+
+    chat_id здесь = node_id чата FunPay (int).
+    buyer_username используется как fallback для поиска чата.
+    """
     if CTX.cardinal is None:
         return
-    try:
-        CTX.cardinal.send_message(chat_id, text, buyer_username)
-    except Exception as ex:
-        logger.warning("send_message failed: %s", ex)
+    node_id = chat_id
+
+    # Если chat_id=0 или None, но есть buyer_username — пробуем найти чат
+    if not node_id and buyer_username:
+        node_id = _find_chat_node_by_username(buyer_username)
+    if not node_id:
+        logger.warning("send_buyer_message: no valid node_id (chat_id=%s, user=%s)", chat_id, buyer_username)
+        return
+
+    # Пробуем разные способы отправки (FPC версии различаются)
+    sent = False
+
+    # Способ 1: cardinal.send_message(node_id, text)
+    if not sent and hasattr(CTX.cardinal, "send_message"):
+        try:
+            CTX.cardinal.send_message(int(node_id), text)
+            sent = True
+            logger.debug("sent via cardinal.send_message to node %s", node_id)
+        except TypeError:
+            # Может быть другая сигнатура — пробуем с 3 аргументами
+            try:
+                CTX.cardinal.send_message(int(node_id), text, buyer_username)
+                sent = True
+            except Exception as ex2:
+                logger.debug("cardinal.send_message(3 args) failed: %s", ex2)
+        except Exception as ex:
+            logger.debug("cardinal.send_message failed: %s", ex)
+
+    # Способ 2: через account
+    if not sent and hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "send_message"):
+        try:
+            CTX.cardinal.account.send_message(int(node_id), text)
+            sent = True
+            logger.debug("sent via cardinal.account.send_message to node %s", node_id)
+        except Exception as ex:
+            logger.debug("cardinal.account.send_message failed: %s", ex)
+
+    # Способ 3: через runner
+    if not sent and hasattr(CTX.cardinal, "runner") and hasattr(CTX.cardinal.runner, "send_message"):
+        try:
+            CTX.cardinal.runner.send_message(int(node_id), text)
+            sent = True
+            logger.debug("sent via cardinal.runner.send_message to node %s", node_id)
+        except Exception as ex:
+            logger.debug("cardinal.runner.send_message failed: %s", ex)
+
+    # Способ 4: через FunPayAPI напрямую
+    if not sent and hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "runner"):
+        runner = CTX.cardinal.account.runner
+        if hasattr(runner, "send_message"):
+            try:
+                runner.send_message(int(node_id), text)
+                sent = True
+                logger.debug("sent via account.runner.send_message to node %s", node_id)
+            except Exception as ex:
+                logger.debug("account.runner.send_message failed: %s", ex)
+
+    if not sent:
+        logger.error("send_buyer_message: ALL methods failed for node_id=%s, text=%s", node_id, text[:50])
+        notify_tg(f"⚠️ Не удалось отправить сообщение покупателю (node={node_id}):\n<code>{html_escape(text[:200])}</code>")
+
+
+def _find_chat_node_by_username(username: str) -> int | None:
+    """Пытается найти node_id чата по имени пользователя."""
+    if not username or CTX.cardinal is None:
+        return None
+    # Способ 1: через get_chat_by_name
+    if hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "get_chat_by_name"):
+        try:
+            chat = CTX.cardinal.account.get_chat_by_name(username)
+            if chat and hasattr(chat, "id"):
+                return int(chat.id)
+            if chat and hasattr(chat, "node_id"):
+                return int(chat.node_id)
+        except Exception as ex:
+            logger.debug("get_chat_by_name(%s) failed: %s", username, ex)
+    # Способ 2: поиск в chats_list
+    if hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "chats"):
+        try:
+            for chat in CTX.cardinal.account.chats.values():
+                if getattr(chat, "name", "") == username or getattr(chat, "username", "") == username:
+                    return int(getattr(chat, "id", 0) or getattr(chat, "node_id", 0))
+        except Exception:
+            pass
+    return None
 
 
 def notify_tg(text: str, parse_mode: str = "HTML") -> None:
@@ -1163,13 +1254,36 @@ def on_new_order(c: "Cardinal", e: "NewOrderEvent", *args) -> None:
         if not service:
             notify_tg(f"⚠️ SMMWay: услуга #{lot.service_id} не найдена в каталоге, заказ {order.id} пропущен.")
             return
-        # Safe attribute access for buyer info (FPC order objects may vary)
-        buyer_username = getattr(order, "buyer_username", "") or ""
+
+        # --- Получаем данные покупателя ---
+        buyer_username = getattr(order, "buyer_username", "") or getattr(order, "buyer_name", "") or ""
         buyer_id = getattr(order, "buyer_id", 0) or getattr(order, "buyer_node_id", 0) or 0
-        chat_id = getattr(order, "chat_id", None) or getattr(order, "buyer_id", None) or getattr(order, "buyer_node_id", None) or 0
+
+        # В FPC объект order НЕ содержит chat_id напрямую.
+        # node_id чата получаем: 1) из event, 2) из order, 3) ищем по username
+        chat_id = (
+            getattr(e, "chat_id", None)
+            or getattr(order, "chat_id", None)
+            or getattr(order, "node_id", None)
+            or getattr(order, "buyer_chat_id", None)
+            or 0
+        )
+
+        # Если chat_id не найден — ищем по buyer_username
+        if not chat_id and buyer_username:
+            chat_id = _find_chat_node_by_username(buyer_username) or 0
+
+        # Последний fallback — buyer_id может быть node_id чата
         if not chat_id:
-            logger.error("on_new_order: chat_id=0 for order %s, cannot process", getattr(order, "id", "?"))
-            notify_tg(f"⚠️ SMMWay: заказ {getattr(order, 'id', '?')} пропущен — не удалось определить chat_id покупателя.")
+            chat_id = buyer_id
+
+        if not chat_id:
+            logger.error("on_new_order: cannot determine chat for order %s (buyer=%s)", 
+                        getattr(order, "id", "?"), buyer_username)
+            notify_tg(
+                f"⚠️ SMMWay: заказ {getattr(order, 'id', '?')} — не удалось найти чат покупателя "
+                f"({buyer_username}). Сообщение не отправлено."
+            )
             return
         # Save order, request link from buyer.
         try:
@@ -1203,16 +1317,23 @@ def on_new_order(c: "Cardinal", e: "NewOrderEvent", *args) -> None:
         # ask link
         msg = CTX.storage.templates["msg_await_link"]
         send_buyer_message(chat_id, msg, buyer_username)
+        # Сохраняем state и по buyer_id, и по chat_id — при получении ответа
+        # от покупателя в on_new_message ищем по обоим ключам
         CTX.buyer_state.set_awaiting_link(
             buyer_id, order.id, lot, entry.quantity, chat_id
         )
+        if chat_id and chat_id != buyer_id:
+            CTX.buyer_state.set_awaiting_link(
+                chat_id, order.id, lot, entry.quantity, chat_id
+            )
         if CTX.storage.cfg.get("notify_balance_before"):
             try:
                 bal = CTX.api.balance()
                 notify_tg(f"💰 SMMWay баланс до создания заказа: <code>{bal:.4f}</code> ₽")
             except Exception:
                 pass
-        logger.info("new order %s queued for service %s", order.id, lot.service_id)
+        logger.info("new order %s: chat_id=%s, buyer_id=%s, buyer=%s, service=%s",
+                    order.id, chat_id, buyer_id, buyer_username, lot.service_id)
     except Exception:
         logger.exception("on_new_order failed for order %s", getattr(order, "id", "?"))
 
@@ -1255,15 +1376,25 @@ def on_new_message(c: "Cardinal", e: "NewMessageEvent", *args) -> None:
         return
     # waiting for link?
     buyer_id = getattr(msg, "author_id", None)
-    if buyer_id is None:
+    chat_id = getattr(msg, "chat_id", None)
+    if buyer_id is None and chat_id is None:
         return
-    state = CTX.buyer_state.get(buyer_id)
+    # Ищем state по buyer_id или по chat_id (FPC может передавать разные идентификаторы)
+    state = None
+    if buyer_id is not None:
+        state = CTX.buyer_state.get(buyer_id)
+    if (not state or state.get("type") != "awaiting_link") and chat_id is not None:
+        state = CTX.buyer_state.get(chat_id)
     if not state or state.get("type") != "awaiting_link":
         return
     link = parse_link_or_username(text)
     if not link:
         return
-    CTX.buyer_state.pop_awaiting_link(buyer_id)
+    # pop из обоих возможных ключей
+    if buyer_id is not None:
+        CTX.buyer_state.pop_awaiting_link(buyer_id)
+    if chat_id is not None:
+        CTX.buyer_state.pop_awaiting_link(chat_id)
     _process_smm_order(state, link)
 
 
@@ -1776,7 +1907,8 @@ def status_poller_loop() -> None:
                                              last_check_at=_now_iso())
                     CTX.storage.stats["completed"] += 1
                     send_buyer_message(o.chat_id,
-                                       CTX.storage.templates["msg_order_completed"])
+                                       CTX.storage.templates["msg_order_completed"],
+                                       o.buyer_username)
                     # Ответ на отзыв шлём при событии отзыва (см. _maybe_process_review),
                     # а не здесь — иначе будет ошибка "review not yet left by buyer".
                 elif status_raw in ("canceled", "cancelled", "partial"):
