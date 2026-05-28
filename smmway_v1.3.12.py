@@ -1073,24 +1073,24 @@ def render_lot(template: str, *, service: dict, lot: LotEntry, fp_price: float |
 # =============================================================================
 
 
-def compute_fp_price(service: dict, *, markup_pct: float, rate: float,
+def compute_fp_price(service: dict, *, markup_pct: float, rate: float = 1.0,
                      min_price: float = 1.0) -> float:
-    """SMM-цена за 1 единицу × наценка%.
+    """Цена лота = (цена за 1 единицу на smmway) * (наценка% / 100).
 
-    Формула: (цена за 1 единицу на smmway) * (наценка% / 100).
-    Пример: если rate_per_1000 = 2.7 (т.е. 0.0027 за 1 шт.) и наценка = 55%,
-    то price = 0.0027 * (55 / 100) = 0.001485.
+    Пример: rate_per_1000 = 2.7 → за 1 шт = 0.0027.
+    Наценка 55% → 0.0027 * 55 / 100 = 0.001485.
 
-    Если итоговая цена слишком мала и лот не выставляется — ставим 1 руб.
+    Если лот не получилось выставить из-за слишком маленькой цены —
+    ставим минимальную (1 руб).
     """
     try:
         rate_per_1000 = float(service.get("rate") or service.get("price") or 0)
     except (TypeError, ValueError):
         rate_per_1000 = 0.0
-    per_unit_rub = rate_per_1000 / 1000.0
-    price = per_unit_rub * (markup_pct / 100.0) * rate
+    per_unit = rate_per_1000 / 1000.0
+    price = per_unit * (markup_pct / 100.0)
     price = round(price, 4)
-    # Если цена слишком маленькая (лот не выставится) — ставим минимум 1 руб.
+    # Если лот не выставляется из-за цены — ставим минимальную (1 руб)
     floor = max(1.0, min_price)
     if price < floor:
         price = floor
