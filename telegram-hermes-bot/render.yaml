@@ -1,0 +1,18 @@
+# Конфигурация для деплоя на Render.com как фоновый worker.
+# Подключи репозиторий в Render → он подхватит этот файл.
+services:
+  - type: worker
+    name: telegram-hermes-bot
+    runtime: python
+    plan: starter            # бесплатного worker-плана на Render нет; starter — самый дешёвый
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m src.bot
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false          # значение вводишь вручную в дашборде (секрет)
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: HERMES_MODEL
+        value: nousresearch/hermes-3-llama-3.1-70b
+      - key: MAX_HISTORY_MESSAGES
+        value: "20"

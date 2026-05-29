@@ -1,0 +1,6 @@
+aiogram==3.13.1
+openai==1.51.0
+# httpx>=0.28 убрал аргумент proxies, который использует openai 1.51 -> фиксируем.
+httpx==0.27.2
+aiosqlite==0.20.0
+python-dotenv==1.0.1
