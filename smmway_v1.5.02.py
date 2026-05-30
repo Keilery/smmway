@@ -260,7 +260,13 @@ class SMMWayAPI:
                 try:
                     data = r.json()
                 except ValueError as ex:
-                    raise SMMWayError(f"Не JSON-ответ: {r.text[:200]}") from ex
+                    # Don't include raw HTML in error messages
+                    if r.text.strip().startswith("<!") or r.text.strip().startswith("<html"):
+                        raise SMMWayError(
+                            f"Сервер вернул HTML вместо JSON (HTTP {r.status_code}). "
+                            f"Возможно, сервис временно недоступен."
+                        ) from ex
+                    raise SMMWayError(f"Не JSON-ответ: {r.text[:120]}") from ex
                 if isinstance(data, dict) and data.get("error"):
                     raise SMMWayError(str(data["error"]))
                 return data if isinstance(data, dict) else {"result": data}
@@ -1641,10 +1647,17 @@ def _handle_refill_command(c: "Cardinal", msg) -> None:
         )
     except SMMWayError as ex:
         logger.warning("refill command failed for order %s: %s", found.smm_order_id, ex)
-        send_buyer_message(
-            chat_id,
-            f"⚠️ Не удалось запросить рефилл: {ex}",
-            getattr(msg, "author", ""),
+        # Show clean message to buyer, don't leak API internals
+        user_msg = (
+            "⚠️ Не удалось запросить рефилл: сервис временно недоступен.\n"
+            "Попробуйте позже или обратитесь к продавцу."
+        )
+        send_buyer_message(chat_id, user_msg, getattr(msg, "author", ""))
+        notify_tg(
+            f"⚠️ Ошибка рефилла\n"
+            f"FP: <code>#{found.funpay_order_id}</code>\n"
+            f"SMM: <code>#{found.smm_order_id}</code>\n"
+            f"Ошибка: <code>{str(ex)[:200]}</code>"
         )
 
 
@@ -1731,10 +1744,17 @@ def _handle_cancel_command(c: "Cardinal", msg) -> None:
         )
     except SMMWayError as ex:
         logger.warning("cancel command failed for order %s: %s", found.smm_order_id, ex)
-        send_buyer_message(
-            chat_id,
-            f"⚠️ Не удалось отменить заказ: {ex}",
-            getattr(msg, "author", ""),
+        # Show clean message to buyer, don't leak API internals
+        user_msg = (
+            "⚠️ Не удалось отменить заказ: сервис временно недоступен.\n"
+            "Попробуйте позже или обратитесь к продавцу."
+        )
+        send_buyer_message(chat_id, user_msg, getattr(msg, "author", ""))
+        notify_tg(
+            f"⚠️ Ошибка отмены заказа\n"
+            f"FP: <code>#{found.funpay_order_id}</code>\n"
+            f"SMM: <code>#{found.smm_order_id}</code>\n"
+            f"Ошибка: <code>{str(ex)[:200]}</code>"
         )
 
 
