@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 # =============================================================================
 
 NAME = "SMMWay"
-VERSION = "1.5.03"
+VERSION = "1.5.04"
 DESCRIPTION = (
     "Автоматическая перепродажа услуг накрутки через FunPay Cardinal.\n"
     "• Dynamic Workflows — адаптивное управление заказами.\n"
@@ -433,6 +433,10 @@ DEFAULT_CONFIG = {
     "service_recovery_window_orders": 20,
     "service_recovery_cooldown_sec": 1800,
     "service_recovery_auto_reenable": True,
+    # GitHub auto-update
+    "auto_update_enabled": True,
+    "auto_update_interval_sec": 3600,
+    "github_repo": "Keilery/smmway",
     "log_level": "INFO",
 }
 
@@ -3527,7 +3531,7 @@ def main_menu_kb():
     kb.add(B("⚙️ Настройки", callback_data=f"{CB}:settings"))
     kb.add(B("❤️ Health-check", callback_data=f"{CB}:health"))
     kb.add(B("🛡 Стабилизатор", callback_data=f"{CB}:recovery"))
-    kb.add(B("🔄 Обновить", callback_data=f"{CB}:main"))
+    kb.add(B("📥 Обновления", callback_data=f"{CB}:update"))
     return kb
 
 
@@ -3649,6 +3653,35 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
             if data == f"{CB}:recovery_cooldown_set":
                 _ask_value(c, "service_recovery_cooldown_sec",
                            "Введи кулдаун восстановления в секундах, напр. <code>1800</code>", cast=int)
+                return
+            if data == f"{CB}:update":
+                _show_update_menu(c)
+                return
+            if data == f"{CB}:update_toggle":
+                CTX.storage.cfg["auto_update_enabled"] = not CTX.storage.cfg.get("auto_update_enabled", True)
+                CTX.storage.save_config()
+                _show_update_menu(c)
+                return
+            if data == f"{CB}:update_check":
+                result = check_github_update(force=True)
+                if result:
+                    bot.answer_callback_query(c.id, f"Найдено обновление: v{result[0]}")
+                else:
+                    bot.answer_callback_query(c.id, "Обновлений не найдено")
+                _show_update_menu(c)
+                return
+            if data == f"{CB}:update_apply":
+                result = check_github_update()
+                if result:
+                    new_ver, dl_url = result
+                    ok = perform_update(dl_url, new_ver)
+                    if ok:
+                        bot.answer_callback_query(c.id, f"✅ Обновлено до {new_ver}! Перезагрузите FPC.")
+                    else:
+                        bot.answer_callback_query(c.id, "❌ Ошибка обновления. Подробности в логе.")
+                else:
+                    bot.answer_callback_query(c.id, "Обновлений не найдено")
+                _show_update_menu(c)
                 return
             if data == f"{CB}:settings":
                 _show_settings_menu(c)
@@ -4830,7 +4863,160 @@ def _show_order_card(c, order_id: str):
 
 
 # =============================================================================
-# 13. INIT / SHUTDOWN
+# 13. GITHUB AUTO-UPDATE
+# =============================================================================
+
+_update_cache: dict = {"result": None, "checked_at": 0.0}
+
+
+def _parse_version(v: str) -> tuple:
+    """Parse version string like '1.5.03' into a comparable tuple of ints."""
+    return tuple(int(x) for x in v.strip().split("."))
+
+
+def check_github_update(force: bool = False):
+    """Check GitHub repo for a newer version of the plugin.
+
+    Returns (latest_version, download_url) or None.
+    Uses a 5-minute cache to avoid hitting GitHub API rate limits.
+    Pass force=True to bypass the cache.
+    """
+    if not force and time.time() - _update_cache["checked_at"] < 300:
+        return _update_cache["result"]
+    try:
+        repo = CTX.storage.cfg.get("github_repo", "Keilery/smmway") if CTX.storage else "Keilery/smmway"
+        url = f"https://api.github.com/repos/{repo}/contents/"
+        resp = requests.get(url, timeout=30)
+        if resp.status_code != 200:
+            logger.warning("GitHub API returned %s", resp.status_code)
+            _update_cache["result"] = None
+            _update_cache["checked_at"] = time.time()
+            return None
+        files = resp.json()
+        pattern = re.compile(r"^smmway_v([\d.]+)\.py$")
+        best_version = None
+        best_url = None
+        for f in files:
+            if not isinstance(f, dict):
+                continue
+            name = f.get("name", "")
+            m = pattern.match(name)
+            if m:
+                ver_str = m.group(1)
+                try:
+                    ver_tuple = _parse_version(ver_str)
+                    if best_version is None or ver_tuple > best_version:
+                        best_version = ver_tuple
+                        best_url = f.get("download_url", "")
+                except (ValueError, TypeError):
+                    continue
+        if best_version is None:
+            _update_cache["result"] = None
+            _update_cache["checked_at"] = time.time()
+            return None
+        current = _parse_version(VERSION)
+        if best_version > current:
+            latest_str = ".".join(str(x) for x in best_version)
+            result = (latest_str, best_url)
+            _update_cache["result"] = result
+            _update_cache["checked_at"] = time.time()
+            return result
+        _update_cache["result"] = None
+        _update_cache["checked_at"] = time.time()
+        return None
+    except Exception as ex:
+        logger.exception("check_github_update error: %s", ex)
+        return None
+
+
+def perform_update(download_url: str, new_version: str) -> bool:
+    """Download and install a new version of the plugin.
+
+    Returns True on success, False on error.
+    """
+    try:
+        resp = requests.get(download_url, headers={"Accept": "application/vnd.github.v3.raw"}, timeout=60)
+        if resp.status_code != 200:
+            logger.error("Failed to download update: HTTP %s", resp.status_code)
+            return False
+        _backup_file(__file__)
+        target_dir = os.path.dirname(os.path.abspath(__file__))
+        target_path = os.path.join(target_dir, f"smmway_v{new_version}.py")
+        with open(target_path, "w", encoding="utf-8") as f:
+            f.write(resp.text)
+        logger.info("Update applied: %s -> %s (%s)", VERSION, new_version, target_path)
+        notify_tg(
+            f"<b>SMMWay \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d!</b>\n"
+            f"\u0412\u0435\u0440\u0441\u0438\u044f: {VERSION} \u2192 {new_version}\n"
+            f"\u0424\u0430\u0439\u043b: {os.path.basename(target_path)}\n\n"
+            f"<i>\u041f\u0435\u0440\u0435\u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u0435 FPC \u0434\u043b\u044f \u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u0438\u044f \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f.</i>"
+        )
+        return True
+    except Exception as ex:
+        logger.exception("perform_update error: %s", ex)
+        return False
+
+
+def auto_update_loop() -> None:
+    """Background loop that periodically checks for plugin updates on GitHub."""
+    while CTX.is_running():
+        try:
+            time.sleep(max(60, CTX.storage.cfg.get("auto_update_interval_sec", 3600)))
+            if not CTX.storage.cfg.get("auto_update_enabled", True):
+                continue
+            result = check_github_update(force=True)
+            if result:
+                new_version, download_url = result
+                # Notify about available update
+                notify_tg(
+                    f"\U0001f4e5 <b>\u0414\u043e\u0441\u0442\u0443\u043f\u043d\u043e \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0435 SMMWay!</b>\n"
+                    f"\u0422\u0435\u043a\u0443\u0449\u0430\u044f: <code>{VERSION}</code>\n"
+                    f"\u041d\u043e\u0432\u0430\u044f: <code>{new_version}</code>\n\n"
+                    f"\u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0435 \u0431\u0443\u0434\u0435\u0442 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043e \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438..."
+                )
+                perform_update(download_url, new_version)
+        except Exception:
+            logger.exception("auto_update_loop error")
+
+
+def _show_update_menu(c):
+    """Show the auto-update Telegram menu."""
+    K, B = _kbd()
+    bot = CTX.cardinal.telegram.bot
+    enabled = CTX.storage.cfg.get("auto_update_enabled", True)
+    try:
+        result = check_github_update()
+    except Exception:
+        result = None
+    if result:
+        latest_ver, _ = result
+        status_text = f"\u26a0\ufe0f \u0414\u043e\u0441\u0442\u0443\u043f\u043d\u0430 \u0432\u0435\u0440\u0441\u0438\u044f: <b>{latest_ver}</b>"
+    else:
+        latest_ver = None
+        status_text = "\u2705 \u0423\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0430 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044f\u044f \u0432\u0435\u0440\u0441\u0438\u044f"
+    text = (
+        f"<b>\U0001f4e5 \u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f SMMWay</b>\n\n"
+        f"\u0422\u0435\u043a\u0443\u0449\u0430\u044f \u0432\u0435\u0440\u0441\u0438\u044f: <code>{VERSION}</code>\n"
+        f"{status_text}\n\n"
+        f"\u0410\u0432\u0442\u043e-\u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0435: {'\U0001f7e2 \u0412\u043a\u043b' if enabled else '\U0001f534 \u0412\u044b\u043a\u043b'}\n"
+        f"\u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b: {CTX.storage.cfg.get('auto_update_interval_sec', 3600)} \u0441\u0435\u043a"
+    )
+    kb = K(row_width=1)
+    kb.add(B(("\U0001f7e2" if enabled else "\U0001f534") + " \u0410\u0432\u0442\u043e-\u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0435",
+             callback_data=f"{CB}:update_toggle"))
+    kb.add(B("\U0001f50d \u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f",
+             callback_data=f"{CB}:update_check"))
+    if latest_ver:
+        kb.add(B(f"\u2b06\ufe0f \u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c \u0434\u043e {latest_ver}",
+                 callback_data=f"{CB}:update_apply"))
+    kb.add(B("\u25c0\ufe0f \u041d\u0430\u0437\u0430\u0434", callback_data=f"{CB}:main"))
+    bot.edit_message_text(text, c.message.chat.id, c.message.id,
+                          reply_markup=kb, parse_mode="HTML")
+    bot.answer_callback_query(c.id)
+
+
+# =============================================================================
+# 14. INIT / SHUTDOWN
 # =============================================================================
 
 
@@ -4866,6 +5052,7 @@ def init_plugin(crd: "Cardinal", *args) -> None:
             (auto_price_loop, "smmway-auto-price"),
             (auto_deactivate_loop, "smmway-auto-deact"),
             (service_recovery_loop, "smmway-service-recovery"),
+            (auto_update_loop, "smmway-auto-update"),
             (state_cleanup_loop, "smmway-state-cleanup"),
         ):
             t = threading.Thread(target=fn, name=name, daemon=True)
@@ -4881,7 +5068,7 @@ def on_delete(*args, **kwargs) -> None:
 
 
 # =============================================================================
-# 14. FPC HOOKS
+# 15. FPC HOOKS
 # =============================================================================
 
 BIND_TO_PRE_INIT = [init_plugin]
