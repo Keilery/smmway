@@ -1,0 +1,50 @@
+{
+  "id": "FEAT-001",
+  "type": "feat",
+  "description": "Create smmway_v1.5.03.py from v1.5.02, remove auto-review-reply feature, add Service Health Auto-Recovery (sales stabilization), bump version, update Telegram UI",
+  "status": "in_progress",
+  "steps": [
+    "Copy smmway_v1.5.02.py to smmway_v1.5.03.py in /projects/sandbox/smmway/",
+    "Update VERSION constant from '1.5.02' to '1.5.03' (line 48)",
+    "Remove config keys 'auto_review_enabled' and 'auto_review_text' from DEFAULT_CFG (around line 388-389)",
+    "Remove the entire _maybe_send_review function (lines 2346-2355 approximately)",
+    "Remove the call to _maybe_send_review(o) in _maybe_process_review (around line 1469). Remove the comment '# Авто-ответ на отзыв (если включено)' above it too.",
+    "Remove the callback handler for 'autoreview_toggle' (line ~3493-3496) that toggles auto_review_enabled",
+    "Remove the callback handler for 'autoreview_text_set' (line ~3511-3513) that asks for review text",
+    "Update _show_autoreview_menu function (line ~4515) to remove the auto-reply toggle button, auto-reply text button, and the display of auto-reply status. Keep only the bonus-related UI (bonus toggle, bonus %, min stars). Rename it to something like 'Review Bonus' menu since it now only handles bonuses.",
+    "Remove the comment on line ~2331 that references _maybe_process_review for review reply timing",
+    "Add new config keys to DEFAULT_CFG for Service Health Auto-Recovery: 'service_recovery_enabled': True, 'service_recovery_check_interval_sec': 300, 'service_recovery_min_success_rate': 0.6, 'service_recovery_window_orders': 20, 'service_recovery_cooldown_sec': 1800, 'service_recovery_auto_reenable': True",
+    "Add a new background loop function 'service_recovery_loop()' in section 11 (after auto_deactivate_loop). This loop: (a) runs every service_recovery_check_interval_sec, (b) iterates over all active lots, (c) uses DW.get_service_health_score() to check each service's health, (d) if health score < threshold (derived from service_recovery_min_success_rate), marks the service as 'recovering' - sets lot.active=False temporarily via FunPay API and logs it, (e) after cooldown period, re-enables the lot and resets the DW fail streak for that service, (f) sends Telegram notifications on pause and recovery events",
+    "Add a recovery tracking dict to the DynamicWorkflows class or as module-level: _recovering_services: dict[int, float] mapping service_id to timestamp when recovery started",
+    "Register service_recovery_loop in init_plugin's background loop list (the for fn, name in (...) tuple at line ~4700)",
+    "Add a Telegram menu '_show_recovery_menu(c)' that shows: list of currently recovering services, overall service health summary (healthy/warning/critical counts), toggle for service_recovery_enabled, and adjust threshold/cooldown settings",
+    "Add a button in the main menu for the recovery feature: a button like '🛡 Стабилизатор' that opens _show_recovery_menu",
+    "Add callback handlers for: 'recovery' (open menu), 'recovery_toggle' (enable/disable), 'recovery_threshold_set' (ask for new threshold), 'recovery_cooldown_set' (ask for new cooldown)",
+    "Update the plugin DESCRIPTION string to mention the new Service Health Auto-Recovery feature"
+  ],
+  "acceptance_criteria": [
+    "smmway_v1.5.03.py exists and parses without syntax errors (python -c 'import ast; ast.parse(...)')",
+    "VERSION == '1.5.03' in the new file",
+    "No references to 'auto_review_enabled' or 'auto_review_text' in DEFAULT_CFG",
+    "No _maybe_send_review function exists in the new file",
+    "The call to _maybe_send_review is removed from _maybe_process_review",
+    "auto_review_bonus_enabled and _maybe_place_review_bonus remain intact and functional",
+    "New config keys for service recovery exist in DEFAULT_CFG",
+    "service_recovery_loop function exists and follows the existing background loop pattern",
+    "Recovery loop is registered in init_plugin",
+    "Telegram menu has a recovery/stabilizer button and corresponding handler",
+    "_show_autoreview_menu only shows bonus-related settings (no auto-reply toggle/text)"
+  ],
+  "verification": [
+    "python -c \"import ast; ast.parse(open('/projects/sandbox/smmway/smmway_v1.5.03.py').read()); print('OK')\"",
+    "grep -c 'VERSION = .1.5.03.' /projects/sandbox/smmway/smmway_v1.5.03.py should return 1",
+    "grep -c 'auto_review_enabled' /projects/sandbox/smmway/smmway_v1.5.03.py should return 0",
+    "grep -c 'auto_review_text' /projects/sandbox/smmway/smmway_v1.5.03.py should return 0",
+    "grep -c '_maybe_send_review' /projects/sandbox/smmway/smmway_v1.5.03.py should return 0",
+    "grep -c '_maybe_place_review_bonus' /projects/sandbox/smmway/smmway_v1.5.03.py should be >= 2 (definition + call)",
+    "grep -c 'service_recovery_loop' /projects/sandbox/smmway/smmway_v1.5.03.py should be >= 2",
+    "grep -c 'service_recovery_enabled' /projects/sandbox/smmway/smmway_v1.5.03.py should be >= 2"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

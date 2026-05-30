@@ -1,0 +1,26 @@
+{
+  "project_type": "Single-file Python FPC plugin (FunPay Cardinal) for reselling SMM services",
+  "language": "Python 3.11+",
+  "build_system": "None (single .py file, loaded by FPC runtime)",
+  "test_framework": "None (no tests in repo - plugin runs inside FPC runtime)",
+  "build_command": "python -c \"import ast; ast.parse(open('smmway_v1.5.03.py').read()); print('AST OK')\"",
+  "test_command": "python -c \"import ast; ast.parse(open('smmway_v1.5.03.py').read()); print('Syntax OK')\"",
+  "verification_instructions": "1. Run AST parse to confirm no syntax errors. 2. Verify VERSION constant is '1.5.03'. 3. Verify auto_review_enabled and auto_review_text are removed from config defaults. 4. Verify _maybe_send_review function is removed. 5. Verify new sales stabilizer feature is present and integrates with existing DW engine.",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "No setup needed - single Python file. Just ensure python3 is available.",
+  "environment_constraints": "OPEN_INTERNET network. No FPC runtime available, so validation is AST-based only. Cannot run the plugin end-to-end.",
+  "contribution_requirements": "New version files are created alongside old ones (smmway_v1.5.03.py). Old files stay in repo. Branch from main, create new PR.",
+  "key_patterns": [
+    "File sections numbered 1-14 with '# N. TITLE' headers between '# ====' markers",
+    "Background loops: while CTX.is_running(): try: time.sleep(...); ... except: logger.exception(...)",
+    "Telegram menus: _show_X_menu(c) functions with InlineKeyboardMarkup/Button via _kbd()",
+    "Config: DEFAULT_CFG dict (line 369+), persisted via CTX.storage.cfg / save_config()",
+    "Callback data prefixed with CB='smw', handler dispatch via if data == f'{CB}:action'",
+    "DynamicWorkflows class (DW singleton) at line 2121+ manages service stats, soft-blocking, loyalty",
+    "Orders tracked via OrderEntry dataclass, stored in CTX.storage.orders dict keyed by funpay_order_id"
+  ],
+  "relevant_files": [
+    "smmway_v1.5.02.py (source to copy and modify into smmway_v1.5.03.py)"
+  ],
+  "directory_structure": "Flat repo: smmway_v1.3.12.py, smmway_v1.5.01.py, smmway_v1.5.02.py, README.md. All in root."
+}

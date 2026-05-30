@@ -1,0 +1,7 @@
+{
+  "task_id": "task-v1503-stabilize",
+  "task_description": "Remove auto-review-reply feature, add Service Health Auto-Recovery for sales stabilization, bump version to 1.5.03, create new file smmway_v1.5.03.py",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001"],
+  "blocked_reason": null
+}
