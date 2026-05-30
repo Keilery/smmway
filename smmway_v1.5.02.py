@@ -45,15 +45,15 @@ if TYPE_CHECKING:
 # =============================================================================
 
 NAME = "SMMWay"
-VERSION = "1.3.11"
+VERSION = "1.5.02"
 DESCRIPTION = (
-    "Автоматическая перепродажа услуг накрутки smmway.ru через FunPay Cardinal.\n"
-    "• Автосоздание лотов из услуг smmway с нуля (без существующего лота-шаблона).\n"
-    "• Авто-цена с учётом наценки и курса.\n"
-    "• Авто-деактивация лотов при недоступности услуги.\n"
-    "• Автообработка заказов: запрос ссылки → отправка на smmway → доставка.\n"
-    "• Авто-отзыв, уведомления в Telegram, шаблоны сообщений.\n"
-    "• Health-check, бэкапы стораджа, защита от двойных списаний."
+    "Автоматическая перепродажа услуг накрутки через FunPay Cardinal.\n"
+    "• Dynamic Workflows — адаптивное управление заказами.\n"
+    "• Smart Queue — антифлуд и приоритизация услуг.\n"
+    "• Loyalty — бонусы повторным покупателям.\n"
+    "• Авто-цена, авто-деактивация, авто-замена лотов.\n"
+    "• Команды: !статус !рефилл !отмена.\n"
+    "• Аналитика, чёрный список, авто-повтор при ошибках."
 )
 CREDITS = "@Keilery (форк с нуля на smmway, без чужого кода)"
 UUID = "1f5d4c8e-7a3b-4d6c-9f1e-2b8c5a0d3e7a"
@@ -387,14 +387,13 @@ DEFAULT_CONFIG = {
     "auto_review_bonus_pct": 10.0,
     "notify_order_created": True,
     "notify_order_error": True,
-    "notify_balance_before": False,
+    "notify_balance_before": True,
     "notify_balance_after": True,
     "status_poll_interval_sec": 90,
     "max_buyer_link_wait_sec": 1800,
-    # FunPay позволяет цены ниже 1 руб; пол по-умолчанию убран, цена
-    # лота = smmway-цена × (1 + наценка%) × курс. Если хочешь жёсткий
-    # пол — поменяй здесь или через настройки (значение в FP-валюте).
-    "min_lot_price": 0.0,
+    # Минимальная цена лота. Формула: (цена за 1 ед.) * (наценка%/100) + цена за 1 ед.
+    # Если не получается выставить — пробуем 0.001, потом 1.
+    "min_lot_price": 0.001,
     # Принудительный маппинг платформа → ID подкатегории FunPay.
     # Используется, если авто-детект кладёт услуги «не туда». Например,
     # для Twitter правильная подкатегория FunPay имеет id=1260, и без
@@ -406,6 +405,26 @@ DEFAULT_CONFIG = {
     # случайной другой услугой, которая ещё не выставлена на FunPay
     # (а не просто деактивировать его).
     "auto_replace_missing_service": True,
+    # Авто-повтор при ошибке заказа: проверяет ссылку и баланс, пробует ещё раз.
+    # Если повторно ошибка — возврат денег, блокировка услуги, замена лота.
+    "auto_retry_on_error": True,
+    "auto_retry_max_attempts": 2,
+    # Чёрный список услуг: ID услуг smmway, которые дали ошибки и были заблокированы.
+    "blacklisted_services": [],
+    # --- Dynamic Workflows ---
+    # Система адаптивного управления: бот анализирует паттерны заказов и автоматически
+    # настраивает поведение (тайминги, приоритеты, выбор услуг).
+    "dynamic_workflows_enabled": True,
+    # Если услуга выполняется медленно (> порога) — снижаем приоритет
+    "dw_slow_threshold_sec": 3600,  # 1 час
+    # Если услуга фейлится > N раз подряд — временно отключаем (soft blacklist)
+    "dw_fail_streak_limit": 3,
+    # Авто-бонус за повторные покупки: скидка повторному покупателю
+    "loyalty_enabled": True,
+    "loyalty_bonus_pct": 5.0,  # % бонусного объёма при повторной покупке
+    "loyalty_min_orders": 2,  # мин. кол-во заказов для бонуса
+    # Умная очередь: задержка между заказами одной услуги (anti-flood)
+    "smart_queue_delay_sec": 5,
     "log_level": "INFO",
 }
 
@@ -417,8 +436,7 @@ DEFAULT_LOT_TEMPLATE_RU = {
         "{tags}\n\n"
         "{features}\n\n"
         "📋 Команды:\n"
-        "{commands}\n\n"
-        "#smmway"
+        "{commands}"
     ),
 }
 
@@ -429,8 +447,7 @@ DEFAULT_LOT_TEMPLATE_EN = {
         "{tags_en}\n\n"
         "{features_en}\n\n"
         "📋 Commands:\n"
-        "{commands_en}\n\n"
-        "#smmway"
+        "{commands_en}"
     ),
 }
 
@@ -441,18 +458,18 @@ DEFAULT_MSG_TEMPLATES = {
         "одним сообщением. Если услуга требует ник — напишите его."
     ),
     "order_created": (
-        "✅ Заказ #{smm_id} принят на smmway. Объём: {qty}. "
-        "Это автоматически, ждать ничего не нужно."
+        "✅ Заказ принят! Объём: {qty}. "
+        "Накрутка запущена автоматически, ждать ничего не нужно."
     ),
     "order_completed": (
-        "🎉 Заказ выполнен. Если всё ок — подтвердите выполнение и оставьте отзыв на FunPay. "
+        "🎉 Заказ выполнен! Если всё ок — подтвердите выполнение и оставьте отзыв. "
         "Спасибо!"
     ),
     "order_error": (
         "⚠️ Возникла проблема с заказом: {reason}. "
         "Возврат уже инициирован, при необходимости напишите продавцу."
     ),
-    "status_reply": "📊 Статус заказа #{smm_id}: {status}",
+    "status_reply": "📊 Статус заказа: {status}",
 }
 
 
@@ -613,10 +630,23 @@ class Storage:
             for e in self.lots.values():
                 if e.service_id == sid:
                     return e
-        # 2. Match by exact title
+        # 2. Match by lot_id in description (format "#lot:123")
+        lot_m = re.search(r"#lot:(\d+)", description)
+        if lot_m:
+            lid = int(lot_m.group(1))
+            if lid in self.lots:
+                return self.lots[lid]
+        # 3. Bidirectional title match
         for e in self.lots.values():
             for t in (e.title_ru, e.title_en):
-                if t and t.strip().lower() in norm:
+                if not t:
+                    continue
+                t_norm = t.strip().lower()
+                # title is substring of description (main direction)
+                if t_norm in norm:
+                    return e
+                # description is substring of title (reverse - only for non-trivial descriptions)
+                if len(norm) >= 10 and norm in t_norm:
                     return e
         return None
 
@@ -919,8 +949,7 @@ def _sanitize_en(text: str, *, kind: str, service: dict | None = None) -> str:
         return "🌟 SMM 🌟 | ❤️ Service ❤️ | ✅FAST✅"
     return (
         "SMM service.\nStable, instant start.\n\n"
-        "Send the link — the order will start automatically.\n\n"
-        "#smmway"
+        "Send the link — the order will start automatically."
     )
 
 
@@ -1016,8 +1045,20 @@ def render_lot(template: str, *, service: dict, lot: LotEntry, fp_price: float |
         features.append("⛔ Возможна отмена")
     min_ = service.get("min", "")
     max_ = service.get("max", "")
-    commands = "Отправьте ссылку — заказ запустится автоматически."
-    commands_en = "Send the link — the order will start automatically."
+    commands = (
+        "Отправьте ссылку — заказ запустится автоматически.\n\n"
+        "📋 Доступные команды в чате:\n"
+        "!статус — подробная информация о заказе\n"
+        "!рефилл — повторная накрутка (не на всех услугах)\n"
+        "!отмена — отмена заказа (деньги вернутся, если SMM-платформа подтвердит)"
+    )
+    commands_en = (
+        "Send the link — the order will start automatically.\n\n"
+        "📋 Available chat commands:\n"
+        "!статус — detailed order info\n"
+        "!рефилл — re-order (not available for all services)\n"
+        "!отмена — cancel order (refund only if confirmed by SMM platform)"
+    )
     # Безопасный фоллбек, чтобы заголовок не становился неподтвержденно-английским:
     # если type_en сам по себе содержит кириллицу (например, fallback по первому
     # слову имени услуги) — заменяем на нейтральное "Service".
@@ -1051,27 +1092,28 @@ def render_lot(template: str, *, service: dict, lot: LotEntry, fp_price: float |
 # =============================================================================
 
 
-def compute_fp_price(service: dict, *, markup_pct: float, rate: float,
-                     min_price: float = 0.0) -> float:
-    """SMM-цена за 1000 → FP-цена за 1 шт., с учётом наценки и курса.
+def compute_fp_price(service: dict, *, markup_pct: float, rate: float = 1.0,
+                     min_price: float = 1.0) -> float:
+    """Цена лота = (цена за 1 ед. * наценка%/100) + цена за 1 ед.
 
-    FunPay позволяет цены меньше рубля — поэтому фиксируем порог только
-    как анти-ноль (1e-4): иначе для услуг с очень дешёвой ставкой за 1000
-    цена за 1 шт. при наценке всё равно осталась бы микроскопической, но
-    хотя бы не нулевой (нулевую FunPay не принимает). ``min_price`` оставлен
-    как опциональный параметр для совместимости — если юзер хочет жёстко
-    задрать пол, он передаст значение явно.
+    Пример: rate_per_1000 = 2.7 → за 1 шт = 0.0027.
+    Наценка 55% → 0.0027 * 55/100 = 0.001485 → 0.001485 + 0.0027 = 0.004185.
+
+    Если лот не получается выставить — пробуем 0.001.
+    Если и так не получается — ставим 1.
     """
     try:
         rate_per_1000 = float(service.get("rate") or service.get("price") or 0)
     except (TypeError, ValueError):
         rate_per_1000 = 0.0
-    per_unit_rub = rate_per_1000 / 1000.0
-    price = per_unit_rub * (1.0 + markup_pct / 100.0) * rate
-    price = round(price, 4)
-    # Анти-ноль: FunPay не принимает 0. Если пол min_price выставлен — уважаем.
-    floor = max(0.0001, min_price)
-    return max(price, floor)
+    per_unit = rate_per_1000 / 1000.0
+    markup_amount = per_unit * (markup_pct / 100.0)
+    price = markup_amount + per_unit
+    price = round(price, 6)
+    # Если лот не получается выставить — пробуем минимум 0.001
+    if price < 0.001:
+        price = 0.001
+    return price
 
 
 # =============================================================================
@@ -1112,12 +1154,89 @@ CTX = PluginContext()
 
 
 def send_buyer_message(chat_id: int | str, text: str, buyer_username: str = "") -> None:
+    """Отправляет сообщение покупателю в чат FunPay.
+
+    chat_id = node_id чата FunPay. Может быть:
+    - строка вида "users-XXXXX-YYYYY" (основной формат FPC)
+    - целое число (старые версии FPC)
+    - 0/None — тогда ищем по buyer_username
+
+    Передаём node_id КАК ЕСТЬ (без int() преобразования!).
+    """
     if CTX.cardinal is None:
         return
-    try:
-        CTX.cardinal.send_message(chat_id, text, buyer_username)
-    except Exception as ex:
-        logger.warning("send_message failed: %s", ex)
+    node_id = chat_id
+
+    # Если chat_id пуст — ищем по username
+    if not node_id and buyer_username:
+        node_id = _find_chat_node_by_username(buyer_username)
+    if not node_id:
+        logger.warning("send_buyer_message: no node_id (chat_id=%s, user=%s)", chat_id, buyer_username)
+        return
+
+    # Пробуем отправить — node_id передаём как есть (str или int)
+    sent = False
+    methods = []
+
+    # Собираем доступные методы отправки
+    if hasattr(CTX.cardinal, "send_message"):
+        methods.append(("cardinal.send_message", CTX.cardinal.send_message))
+    if hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "send_message"):
+        methods.append(("account.send_message", CTX.cardinal.account.send_message))
+    if hasattr(CTX.cardinal, "runner") and hasattr(CTX.cardinal.runner, "send_message"):
+        methods.append(("runner.send_message", CTX.cardinal.runner.send_message))
+    if hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "runner"):
+        runner = CTX.cardinal.account.runner
+        if hasattr(runner, "send_message"):
+            methods.append(("account.runner.send_message", runner.send_message))
+
+    for method_name, method in methods:
+        if sent:
+            break
+        # Пробуем: (node_id, text), (node_id, text, username), (str), (int)
+        for nid in (node_id, str(node_id)):
+            if sent:
+                break
+            try:
+                method(nid, text)
+                sent = True
+                logger.debug("sent via %s to %s", method_name, nid)
+            except Exception:
+                pass
+            if not sent:
+                try:
+                    method(nid, text, buyer_username)
+                    sent = True
+                    logger.debug("sent via %s(3args) to %s", method_name, nid)
+                except Exception:
+                    pass
+
+    if not sent:
+        logger.error("send_buyer_message FAILED: node_id=%s, text=%s...", node_id, text[:40])
+        notify_tg(f"⚠️ Не удалось отправить сообщение покупателю (node={node_id})")
+
+
+def _find_chat_node_by_username(username: str):
+    """Пытается найти node_id чата по имени пользователя. Возвращает str/int или None."""
+    if not username or CTX.cardinal is None:
+        return None
+    # Способ 1: через get_chat_by_name
+    if hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "get_chat_by_name"):
+        try:
+            chat = CTX.cardinal.account.get_chat_by_name(username)
+            if chat:
+                return getattr(chat, "id", None) or getattr(chat, "node_id", None)
+        except Exception as ex:
+            logger.debug("get_chat_by_name(%s) failed: %s", username, ex)
+    # Способ 2: поиск в chats_list
+    if hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "chats"):
+        try:
+            for chat in CTX.cardinal.account.chats.values():
+                if getattr(chat, "name", "") == username or getattr(chat, "username", "") == username:
+                    return getattr(chat, "id", None) or getattr(chat, "node_id", None)
+        except Exception:
+            pass
+    return None
 
 
 def notify_tg(text: str, parse_mode: str = "HTML") -> None:
@@ -1134,17 +1253,51 @@ def on_new_order(c: "Cardinal", e: "NewOrderEvent", *args) -> None:
         return
     order = e.order
     try:
-        lot = CTX.storage.find_lot_by_title(order.description)
+        # Пробуем найти лот: сначала по lot_id (если FPC передаёт), потом по описанию
+        lot = None
+        lot_id = getattr(order, "lot_id", None) or getattr(order, "subcategory_id", None)
+        if lot_id and int(lot_id) in CTX.storage.lots:
+            lot = CTX.storage.lots[int(lot_id)]
+        if not lot:
+            lot = CTX.storage.find_lot_by_title(getattr(order, "description", "") or "")
         if not lot or not lot.active:
             return
         service = CTX.api.find_service(lot.service_id) if CTX.api else None
         if not service:
-            notify_tg(f"⚠️ SMMWay: услуга #{lot.service_id} не найдена в каталоге, заказ {order.id} пропущен.")
+            notify_tg(f"⚠️ Услуга #{lot.service_id} не найдена в каталоге, заказ {order.id} пропущен.")
+            return
+
+        # --- Получаем данные покупателя ---
+        buyer_username = getattr(order, "buyer_username", "") or getattr(order, "buyer_name", "") or ""
+        buyer_id = getattr(order, "buyer_id", 0) or getattr(order, "buyer_node_id", 0) or 0
+
+        # В FPC объект order НЕ содержит chat_id напрямую.
+        # node_id чата получаем: 1) из event, 2) из order, 3) ищем по username
+        chat_id = (
+            getattr(e, "chat_id", None)
+            or getattr(order, "chat_id", None)
+            or getattr(order, "node_id", None)
+            or getattr(order, "buyer_chat_id", None)
+            or 0
+        )
+
+        # Если chat_id не найден — ищем по buyer_username
+        if not chat_id and buyer_username:
+            chat_id = _find_chat_node_by_username(buyer_username) or 0
+
+        # Последний fallback — buyer_id может быть node_id чата
+        if not chat_id:
+            chat_id = buyer_id
+
+        if not chat_id:
+            logger.error("on_new_order: cannot determine chat for order %s (buyer=%s)", 
+                        getattr(order, "id", "?"), buyer_username)
+            notify_tg(
+                f"⚠️ SMMWay: заказ {getattr(order, 'id', '?')} — не удалось найти чат покупателя "
+                f"({buyer_username}). Сообщение не отправлено."
+            )
             return
         # Save order, request link from buyer.
-        # Сразу фиксируем сколько заплатил покупатель на FunPay (₽) и
-        # сколько потратим на smmway за этот объём — пригодится для
-        # уведомления о запуске бота, истории и расчёта прибыли.
         try:
             fp_price = float(getattr(order, "price", 0) or 0)
         except (TypeError, ValueError):
@@ -1163,9 +1316,9 @@ def on_new_order(c: "Cardinal", e: "NewOrderEvent", *args) -> None:
             funpay_order_id=order.id,
             funpay_lot_id=lot.funpay_lot_id,
             service_id=lot.service_id,
-            buyer_username=order.buyer_username,
-            buyer_id=order.buyer_id,
-            chat_id=order.chat_id,
+            buyer_username=buyer_username,
+            buyer_id=buyer_id,
+            chat_id=chat_id,
             quantity=qty,
             status="awaiting_link",
             funpay_price=fp_price,
@@ -1175,17 +1328,24 @@ def on_new_order(c: "Cardinal", e: "NewOrderEvent", *args) -> None:
         CTX.storage.add_order(entry)
         # ask link
         msg = CTX.storage.templates["msg_await_link"]
-        send_buyer_message(order.chat_id, msg, order.buyer_username)
+        send_buyer_message(chat_id, msg, buyer_username)
+        # Сохраняем state и по buyer_id, и по chat_id — при получении ответа
+        # от покупателя в on_new_message ищем по обоим ключам
         CTX.buyer_state.set_awaiting_link(
-            order.buyer_id, order.id, lot, entry.quantity, order.chat_id
+            buyer_id, order.id, lot, entry.quantity, chat_id
         )
+        if chat_id and chat_id != buyer_id:
+            CTX.buyer_state.set_awaiting_link(
+                chat_id, order.id, lot, entry.quantity, chat_id
+            )
         if CTX.storage.cfg.get("notify_balance_before"):
             try:
                 bal = CTX.api.balance()
-                notify_tg(f"💰 SMMWay баланс до создания заказа: <code>{bal:.4f}</code> ₽")
+                logger.info("balance before order %s: %.4f", order.id, bal)
             except Exception:
                 pass
-        logger.info("new order %s queued for service %s", order.id, lot.service_id)
+        logger.info("new order %s: chat_id=%s, buyer_id=%s, buyer=%s, service=%s",
+                    order.id, chat_id, buyer_id, buyer_username, lot.service_id)
     except Exception:
         logger.exception("on_new_order failed for order %s", getattr(order, "id", "?"))
 
@@ -1211,21 +1371,60 @@ def on_new_message(c: "Cardinal", e: "NewMessageEvent", *args) -> None:
     text = (msg.text or "").strip()
     if not text:
         return
-    # status query?
-    if text.lower() in ("статус", "status", "/status", "/статус"):
+    # Chat commands (with ! prefix)
+    text_lower = text.lower()
+    if text_lower in ("!статус", "!status"):
+        _handle_status_command(c, msg)
+        return
+    if text_lower in ("!рефилл", "!refill"):
+        _handle_refill_command(c, msg)
+        return
+    if text_lower in ("!отмена", "!cancel"):
+        _handle_cancel_command(c, msg)
+        return
+    # status query? (backward compat without ! prefix)
+    if text_lower in ("статус", "status", "/status", "/статус"):
         _handle_status_query(c, msg)
         return
     # waiting for link?
     buyer_id = getattr(msg, "author_id", None)
-    if buyer_id is None:
+    chat_id = getattr(msg, "chat_id", None)
+    if buyer_id is None and chat_id is None:
         return
-    state = CTX.buyer_state.get(buyer_id)
+    # Атомарно забираем state (pop) — если кто-то уже забрал, получим None.
+    # Это предотвращает обработку второй ссылки от того же покупателя.
+    state = None
+    if buyer_id is not None:
+        state = CTX.buyer_state.pop_awaiting_link(buyer_id)
+    if not state and chat_id is not None:
+        state = CTX.buyer_state.pop_awaiting_link(chat_id)
     if not state or state.get("type") != "awaiting_link":
         return
+    # Дополнительно удаляем второй ключ (если state был по обоим)
+    if state and buyer_id is not None:
+        CTX.buyer_state.pop_awaiting_link(buyer_id)
+    if state and chat_id is not None:
+        CTX.buyer_state.pop_awaiting_link(chat_id)
+    # Проверяем, что заказ в storage ещё ждёт ссылку (не обработан другим потоком)
+    funpay_order_id = state.get("funpay_order_id")
+    if funpay_order_id:
+        order_entry = CTX.storage.orders.get(funpay_order_id)
+        if order_entry and order_entry.status != "awaiting_link":
+            # Заказ уже обработан — игнорируем повторную ссылку
+            logger.debug("ignoring duplicate link for order %s (status=%s)",
+                        funpay_order_id, order_entry.status)
+            return
     link = parse_link_or_username(text)
     if not link:
+        # State уже удалён, но ссылка не распознана — возвращаем state обратно
+        CTX.buyer_state.set_awaiting_link(
+            buyer_id or chat_id,
+            state["funpay_order_id"],
+            state["lot_entry"],
+            state["quantity"],
+            state["chat_id"],
+        )
         return
-    CTX.buyer_state.pop_awaiting_link(buyer_id)
     _process_smm_order(state, link)
 
 
@@ -1329,6 +1528,212 @@ def _maybe_place_review_bonus(o: OrderEntry, stars: int) -> None:
         )
 
 
+def _handle_status_command(c: "Cardinal", msg) -> None:
+    """Handle !статус / !status - show detailed order info."""
+    buyer_id = getattr(msg, "author_id", None)
+    chat_id = getattr(msg, "chat_id", None)
+    if buyer_id is None or chat_id is None:
+        return
+    # Find latest order for this buyer
+    found = None
+    for o in CTX.storage.orders.values():
+        if o.buyer_id == buyer_id:
+            if found is None or o.created_at > found.created_at:
+                found = o
+    if not found:
+        send_buyer_message(chat_id, "У вас пока нет заказов.", getattr(msg, "author", ""))
+        return
+    if not found.smm_order_id:
+        send_buyer_message(
+            chat_id,
+            f"Заказ ещё не запущен.\nСтатус: {found.status}",
+            getattr(msg, "author", ""),
+        )
+        return
+    # Get fresh status from SMM API
+    try:
+        status_data = CTX.api.order_status(found.smm_order_id)
+    except Exception as ex:
+        logger.warning("status command API error: %s", ex)
+        send_buyer_message(
+            chat_id,
+            f"📊 Статус заказа: {found.smm_status_raw or found.status}\n"
+            f"(не удалось получить актуальные данные)",
+            getattr(msg, "author", ""),
+        )
+        return
+    status = str(status_data.get("status", found.smm_status_raw or found.status))
+    start_count = status_data.get("start_count", "?")
+    remains = status_data.get("remains", "?")
+    # Estimate time remaining
+    time_info = ""
+    try:
+        from datetime import datetime as _dt
+        created = _dt.fromisoformat(found.created_at.replace("Z", "+00:00"))
+        now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+        elapsed_sec = (now - created).total_seconds()
+        if isinstance(remains, (int, float)) and isinstance(start_count, (int, float)):
+            done = int(start_count) + found.quantity - int(remains)
+            if done > 0 and int(remains) > 0:
+                rate_per_sec = done / max(elapsed_sec, 1)
+                eta_sec = int(int(remains) / rate_per_sec)
+                if eta_sec < 3600:
+                    time_info = f"\n⏱ Ориентировочно осталось: ~{eta_sec // 60} мин."
+                else:
+                    time_info = f"\n⏱ Ориентировочно осталось: ~{eta_sec // 3600} ч. {(eta_sec % 3600) // 60} мин."
+    except Exception:
+        pass
+    reply = (
+        f"📊 Подробный статус заказа\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 Статус: {status}\n"
+        f"📐 Начальный счётчик: {start_count}\n"
+        f"📉 Осталось: {remains}\n"
+        f"📦 Заказано: {found.quantity}"
+        f"{time_info}"
+    )
+    send_buyer_message(chat_id, reply, getattr(msg, "author", ""))
+
+
+def _handle_refill_command(c: "Cardinal", msg) -> None:
+    """Handle !рефилл / !refill - request re-order for completed service."""
+    buyer_id = getattr(msg, "author_id", None)
+    chat_id = getattr(msg, "chat_id", None)
+    if buyer_id is None or chat_id is None:
+        return
+    # Find latest completed order for this buyer
+    found = None
+    for o in CTX.storage.orders.values():
+        if o.buyer_id == buyer_id and o.status == "completed" and o.smm_order_id:
+            if found is None or o.created_at > found.created_at:
+                found = o
+    if not found:
+        send_buyer_message(chat_id, "Не найден завершённый заказ для рефилла.", getattr(msg, "author", ""))
+        return
+    # Check if service supports refill
+    service = CTX.api.find_service(found.service_id) if CTX.api else None
+    if not service or not service.get("refill"):
+        send_buyer_message(
+            chat_id,
+            "К сожалению, эта услуга не поддерживает рефилл (повторную накрутку).",
+            getattr(msg, "author", ""),
+        )
+        return
+    # Call refill API
+    try:
+        result = CTX.api.refill(found.smm_order_id)
+        refill_id = result.get("refill") or result.get("result") or ""
+        send_buyer_message(
+            chat_id,
+            f"♻️ Рефилл запрошен!\n"
+            f"Повторная накрутка будет запущена автоматически.",
+            getattr(msg, "author", ""),
+        )
+        notify_tg(
+            f"♻️ Рефилл по запросу покупателя\n"
+            f"FP: <code>#{found.funpay_order_id}</code>\n"
+            f"SMM: <code>#{found.smm_order_id}</code>\n"
+            f"Refill ID: <code>{refill_id}</code>"
+        )
+    except SMMWayError as ex:
+        logger.warning("refill command failed for order %s: %s", found.smm_order_id, ex)
+        send_buyer_message(
+            chat_id,
+            f"⚠️ Не удалось запросить рефилл: {ex}",
+            getattr(msg, "author", ""),
+        )
+
+
+def _handle_cancel_command(c: "Cardinal", msg) -> None:
+    """Handle !отмена / !cancel - cancel active order."""
+    buyer_id = getattr(msg, "author_id", None)
+    chat_id = getattr(msg, "chat_id", None)
+    if buyer_id is None or chat_id is None:
+        return
+    # Find latest active (non-completed) order for this buyer
+    found = None
+    for o in CTX.storage.orders.values():
+        if o.buyer_id == buyer_id and o.smm_order_id:
+            if o.status == "completed":
+                continue
+            if found is None or o.created_at > found.created_at:
+                found = o
+    if not found:
+        # Check if latest order is completed
+        latest = None
+        for o in CTX.storage.orders.values():
+            if o.buyer_id == buyer_id:
+                if latest is None or o.created_at > latest.created_at:
+                    latest = o
+        if latest and latest.status == "completed":
+            send_buyer_message(
+                chat_id,
+                "Завершённые заказы не могут быть отменены.",
+                getattr(msg, "author", ""),
+            )
+        else:
+            send_buyer_message(chat_id, "Не найден активный заказ для отмены.", getattr(msg, "author", ""))
+        return
+    if found.status == "completed":
+        send_buyer_message(
+            chat_id,
+            "Завершённые заказы не могут быть отменены.",
+            getattr(msg, "author", ""),
+        )
+        return
+    # Refresh status before cancel to avoid cancelling completed orders
+    try:
+        fresh_status = CTX.api.order_status(found.smm_order_id)
+        fresh_raw = (fresh_status.get("status") or "").lower()
+        if fresh_raw in ("completed", "complete", "completed_partial"):
+            CTX.storage.update_order(found.funpay_order_id, status="completed", smm_status_raw=fresh_raw)
+            send_buyer_message(chat_id, "Завершённые заказы не могут быть отменены.", getattr(msg, "author", ""))
+            return
+    except Exception:
+        pass  # proceed with cancel attempt even if status check fails
+    # Call cancel API
+    try:
+        result = CTX.api.cancel(found.smm_order_id)
+        # Check if cancellation was successful
+        cancel_status = result.get("status") or result.get("cancel") or ""
+        # Determine if refund happened on SMM side
+        refunded = False
+        # Check for explicit refund confirmation from API
+        if result.get("refund"):
+            refunded = True
+        elif isinstance(cancel_status, str) and cancel_status.lower() in ("cancelled", "canceled"):
+            refunded = True
+        status_msg = f"✅ Заказ отменён."
+        if refunded:
+            status_msg += "\n💰 Средства возвращены."
+            # Attempt FunPay refund
+            try:
+                if hasattr(c, "account") and hasattr(c.account, "refund"):
+                    c.account.refund(found.funpay_order_id)
+                    status_msg += "\n💸 Возврат на FunPay инициирован."
+            except Exception as refund_ex:
+                logger.warning("FunPay refund failed for %s: %s", found.funpay_order_id, refund_ex)
+                status_msg += "\n⚠️ Автоматический возврат на FunPay не удался, обратитесь к продавцу."
+        else:
+            status_msg += "\n⚠️ Платформа не подтвердила возврат средств."
+        CTX.storage.update_order(found.funpay_order_id, status="refunded" if refunded else "error",
+                                 smm_status_raw="Cancelled")
+        send_buyer_message(chat_id, status_msg, getattr(msg, "author", ""))
+        notify_tg(
+            f"⛔ Отмена заказа по запросу покупателя\n"
+            f"FP: <code>#{found.funpay_order_id}</code>\n"
+            f"SMM: <code>#{found.smm_order_id}</code>\n"
+            f"Возврат: {'Да' if refunded else 'Нет'}"
+        )
+    except SMMWayError as ex:
+        logger.warning("cancel command failed for order %s: %s", found.smm_order_id, ex)
+        send_buyer_message(
+            chat_id,
+            f"⚠️ Не удалось отменить заказ: {ex}",
+            getattr(msg, "author", ""),
+        )
+
+
 def _handle_status_query(c: "Cardinal", msg) -> None:
     buyer_id = getattr(msg, "author_id", None)
     chat_id = getattr(msg, "chat_id", None)
@@ -1344,7 +1749,10 @@ def _handle_status_query(c: "Cardinal", msg) -> None:
         return
     status_text = found.smm_status_raw or found.status
     template = CTX.storage.templates["msg_status_reply"]
-    reply = template.format(smm_id=found.smm_order_id, status=status_text)
+    try:
+        reply = template.format(smm_id=found.smm_order_id, status=status_text)
+    except KeyError:
+        reply = template.format(status=status_text)
     send_buyer_message(chat_id, reply, getattr(msg, "author", ""))
 
 
@@ -1410,13 +1818,90 @@ def _format_order_started_notification(
     )
 
 
+# Категории услуг, которые требуют дополнительных параметров при заказе.
+# Ключ — подстрока в имени/категории услуги (lower), значение — dict доп. полей.
+# Некоторые SMM-платформы требуют, например, "runs" для Twitch viewers (сколько
+# минут стрима), "delay" для отложенных заказов и т.д.
+_SERVICE_EXTRA_PARAMS: list[tuple[list[str], dict[str, str]]] = [
+    # Twitch viewers (зрители стрима) — обычно требует "runs" (минуты просмотра)
+    (["twitch", "зрител", "viewer", "live viewer"], {"runs": "60"}),
+    # Twitch chat — иногда требует "runs"
+    (["twitch", "чат", "chat"], {"runs": "30"}),
+]
+
+
+def _build_extra_params(service: dict, link: str, quantity: int) -> dict | None:
+    """Определяет дополнительные параметры для заказа на SMM-платформе.
+
+    Некоторые услуги (Twitch viewers, стримы) требуют доп. полей (runs, delay и т.д.).
+    Возвращает dict с доп. параметрами или None, если они не нужны.
+    """
+    if not service:
+        return None
+    hay = _service_haystack(service)
+    for keywords, extra in _SERVICE_EXTRA_PARAMS:
+        # Все ключевые слова группы должны присутствовать
+        if all(kw in hay for kw in keywords):
+            return extra.copy()
+    return None
+
+
 def _process_smm_order(state: dict, link: str) -> None:
     lot: LotEntry = state["lot_entry"]
     quantity: int = state["quantity"]
     chat_id = state["chat_id"]
     funpay_order_id = state["funpay_order_id"]
+
+    # Финальная проверка: заказ ещё ждёт ссылку? (защита от дублей)
+    order_entry = CTX.storage.orders.get(funpay_order_id)
+    if order_entry and order_entry.status != "awaiting_link":
+        logger.warning("_process_smm_order: order %s already in status '%s', skipping duplicate",
+                       funpay_order_id, order_entry.status)
+        return
+
+    # --- Dynamic Workflows: pre-order checks ---
+    if CTX.storage.cfg.get("dynamic_workflows_enabled", True):
+        # Soft-block: если услуга временно заблокирована — пропускаем без Timer
+        if DW.should_soft_block(lot.service_id):
+            logger.info("DW: service %s soft-blocked, skipping order %s", lot.service_id, funpay_order_id)
+            # Не ставим Timer — просто ждём и пробуем
+            time.sleep(5)
+            # Проверяем ещё раз — если всё ещё заблокирована, уведомляем
+            if DW.should_soft_block(lot.service_id):
+                send_buyer_message(chat_id, "⏳ Услуга временно недоступна. Повторите позже или дождитесь автоматического выполнения.")
+                return
+        # Anti-flood: короткая задержка
+        delay = DW.get_queue_delay(lot.service_id)
+        if delay > 0:
+            time.sleep(min(delay, 10))  # Не более 10 сек
+
+    # --- Dynamic Workflows: loyalty bonus ---
+    bonus_qty = 0
+    buyer_username_for_loyalty = ""
+    if order_entry:
+        buyer_username_for_loyalty = order_entry.buyer_username
+    if CTX.storage.cfg.get("dynamic_workflows_enabled", True) and buyer_username_for_loyalty:
+        DW.record_buyer(buyer_username_for_loyalty)
+        bonus_qty = DW.get_loyalty_bonus(buyer_username_for_loyalty, quantity)
+
+    actual_quantity = quantity + bonus_qty
+
+    # Баланс ДО заказа (для уведомления одним сообщением)
+    balance_before = None
     try:
-        smm_id = CTX.api.add_order(lot.service_id, link, quantity)
+        balance_before = CTX.api.balance()
+    except Exception:
+        pass
+
+    try:
+        # Определяем доп. параметры для услуги (Twitch viewers/стримы и т.д.)
+        service = CTX.api.find_service(lot.service_id) if CTX.api else None
+        extra = _build_extra_params(service, link, actual_quantity) if service else None
+        # Отмечаем отправку (anti-flood)
+        DW.mark_order_sent(lot.service_id)
+        smm_id = CTX.api.add_order(lot.service_id, link, actual_quantity, extra=extra)
+        # Записываем успех в DW
+        DW.record_order_result(lot.service_id, success=True)
         CTX.storage.update_order(
             funpay_order_id,
             smm_order_id=smm_id,
@@ -1452,51 +1937,369 @@ def _process_smm_order(state: dict, link: str) -> None:
         CTX.storage.stats["spent_rub"] = round(
             float(CTX.storage.stats.get("spent_rub", 0.0)) + smmway_charge, 4
         )
-        msg = CTX.storage.templates["msg_order_created"].format(
-            smm_id=smm_id, qty=quantity
-        )
+        try:
+            msg = CTX.storage.templates["msg_order_created"].format(
+                smm_id=smm_id, qty=actual_quantity
+            )
+        except KeyError:
+            msg = CTX.storage.templates["msg_order_created"].format(qty=actual_quantity)
+        # Добавляем инфо о бонусе для повторного покупателя
+        if bonus_qty > 0:
+            msg += f"\n🎁 Бонус за повторную покупку: +{bonus_qty} ед."
         send_buyer_message(chat_id, msg)
         if CTX.storage.cfg.get("notify_order_created"):
-            notify_tg(_format_order_started_notification(
+            # Баланс ПОСЛЕ заказа
+            balance_after = None
+            try:
+                balance_after = CTX.api.balance()
+            except Exception:
+                pass
+            # Формируем единое уведомление с балансом до/после
+            notif_text = _format_order_started_notification(
                 funpay_order_id=funpay_order_id,
                 smm_id=smm_id,
                 lot=lot,
-                quantity=quantity,
+                quantity=actual_quantity,
                 link=link,
                 funpay_price=funpay_price,
                 smmway_charge_rub=smmway_charge,
                 service_name=service_name,
                 buyer_username=buyer_username,
-            ))
-        if CTX.storage.cfg.get("notify_balance_after"):
-            try:
-                bal = CTX.api.balance()
-                notify_tg(f"💰 SMMWay баланс после создания: <code>{bal:.4f}</code> ₽")
-            except Exception:
-                pass
+            )
+            if balance_before is not None:
+                notif_text += f"\n💰 Баланс до: <code>{balance_before:.4f}</code> ₽"
+            if balance_after is not None:
+                notif_text += f"\n💰 Баланс после: <code>{balance_after:.4f}</code> ₽"
+            notify_tg(notif_text)
     except SMMWayError as ex:
+        # --- Dynamic Workflows: записываем неудачу ---
+        DW.record_order_result(lot.service_id, success=False)
+        # --- Авто-повтор при ошибке ---
+        if CTX.storage.cfg.get("auto_retry_on_error", True):
+            retry_result = _retry_order_on_error(lot, link, quantity, funpay_order_id, chat_id, ex)
+            if retry_result:
+                # Повтор удался — выходим
+                return
+        # Повтор не помог или выключен — стандартная обработка ошибки
         CTX.storage.update_order(funpay_order_id, status="error", error=str(ex))
         CTX.storage.stats["failed"] += 1
-        err_msg = CTX.storage.templates["msg_order_error"].format(reason=str(ex))
+        err_msg = CTX.storage.templates["msg_order_error"].format(reason="Услуга временно недоступна")
         send_buyer_message(chat_id, err_msg)
         if CTX.storage.cfg.get("notify_order_error"):
             notify_tg(
-                f"❌ SMMWay ошибка\n"
+                f"❌ Ошибка заказа\n"
                 f"FP: <code>#{funpay_order_id}</code>\n"
                 f"Услуга: <code>{lot.service_id}</code>\n"
                 f"Ссылка: <code>{html_escape(link)}</code>\n"
                 f"Причина: <code>{html_escape(str(ex))}</code>"
             )
-        # Try refund
+        # Возврат денег покупателю
         try:
             CTX.cardinal.account.refund(funpay_order_id)
-            notify_tg(f"💸 Возврат FP-заказа <code>#{funpay_order_id}</code> выполнен автоматически.")
+            notify_tg(f"💸 Возврат FP-заказа <code>#{funpay_order_id}</code> выполнен.")
         except Exception as rex:
             logger.warning("refund failed for %s: %s", funpay_order_id, rex)
+        # Блокируем услугу и заменяем лот
+        if CTX.storage.cfg.get("auto_retry_on_error", True):
+            _blacklist_and_replace_lot(lot)
+
+
+def _retry_order_on_error(lot: LotEntry, link: str, quantity: int,
+                           funpay_order_id: str, chat_id, original_error) -> bool:
+    """Пробует повторить заказ после ошибки.
+
+    1. Проверяет валидность ссылки (формат)
+    2. Проверяет баланс на SMM-платформе
+    3. Пробует заказ ещё раз
+
+    Возвращает True если повтор удался.
+    """
+    max_attempts = int(CTX.storage.cfg.get("auto_retry_max_attempts", 2))
+
+    # Проверка 1: ссылка валидна?
+    if not link or not (link.startswith("http") or re.match(r"^[A-Za-z0-9_.]{3,}$", link)):
+        logger.info("retry: link invalid, skipping retry: %s", link)
+        return False
+
+    # Проверка 2: баланс достаточен?
+    try:
+        service = CTX.api.find_service(lot.service_id)
+        if service:
+            rate_per_1000 = float(service.get("rate") or service.get("price") or 0)
+            needed = rate_per_1000 * quantity / 1000.0
+            balance = CTX.api.balance()
+            if balance < needed:
+                logger.info("retry: balance %.4f < needed %.4f, skipping", balance, needed)
+                notify_tg(f"⚠️ Повтор заказа невозможен: баланс ({balance:.4f}) меньше стоимости ({needed:.4f})")
+                return False
+    except Exception as ex:
+        logger.warning("retry: balance check failed: %s", ex)
+
+    # Проверка 3: услуга не в чёрном списке?
+    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+    if lot.service_id in blacklist:
+        logger.info("retry: service %s is blacklisted, skipping", lot.service_id)
+        return False
+
+    # Пробуем повторить
+    for attempt in range(1, max_attempts + 1):
+        try:
+            time.sleep(2 * attempt)  # пауза перед повтором
+            service = CTX.api.find_service(lot.service_id) if CTX.api else None
+            extra = _build_extra_params(service, link, quantity) if service else None
+            smm_id = CTX.api.add_order(lot.service_id, link, quantity, extra=extra)
+            # Успех!
+            CTX.storage.update_order(
+                funpay_order_id,
+                smm_order_id=smm_id,
+                link=link,
+                status="created",
+            )
+            CTX.storage.stats["sent"] += 1
+            try:
+                msg = CTX.storage.templates["msg_order_created"].format(smm_id=smm_id, qty=quantity)
+            except KeyError:
+                msg = CTX.storage.templates["msg_order_created"].format(qty=quantity)
+            send_buyer_message(chat_id, msg)
+            notify_tg(f"✅ Повтор заказа #{funpay_order_id} удался с попытки {attempt}")
+            return True
+        except SMMWayError as ex:
+            logger.warning("retry attempt %d/%d failed for order %s: %s",
+                          attempt, max_attempts, funpay_order_id, ex)
+            continue
+
+    # Все попытки исчерпаны
+    return False
+
+
+def _blacklist_and_replace_lot(lot: LotEntry) -> None:
+    """Блокирует услугу (добавляет в чёрный список), деактивирует лот и пытается заменить."""
+    service_id = lot.service_id
+
+    # Добавляем в чёрный список
+    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+    if service_id not in blacklist:
+        blacklist.append(service_id)
+        CTX.storage.cfg["blacklisted_services"] = blacklist
+        CTX.storage.save_config()
+        logger.info("service %s added to blacklist", service_id)
+
+    # Деактивируем лот
+    lot.active = False
+    CTX.storage.save_lots()
+
+    # Пробуем заменить другой услугой (если функция потеряшка включена)
+    if CTX.storage.cfg.get("auto_replace_missing_service"):
+        try:
+            services_map = {str(s.get("service")): s for s in CTX.api.services()}
+            # Исключаем заблокированные
+            for bl_id in blacklist:
+                services_map.pop(str(bl_id), None)
+            replacement = _pick_replacement_service(lot, services_map)
+            if replacement:
+                success = _replace_lot_inplace(lot, replacement)
+                if success:
+                    notify_tg(
+                        f"🔄 Услуга <code>#{service_id}</code> заблокирована.\n"
+                        f"Лот заменён на услугу <code>#{replacement.get('service')}</code>."
+                    )
+                    return
+        except Exception as ex:
+            logger.warning("blacklist replace failed: %s", ex)
+
+    # Замена не удалась — удаляем лот полностью
+    try:
+        CTX.storage.unbind_lot(lot.funpay_lot_id)
+        # Пробуем деактивировать на FunPay
+        if hasattr(CTX.cardinal, "account") and hasattr(CTX.cardinal.account, "get_lot_fields"):
+            try:
+                fields = CTX.cardinal.account.get_lot_fields(lot.funpay_lot_id)
+                fields.active = False
+                CTX.cardinal.account.save_lot(fields)
+            except Exception:
+                pass
+        notify_tg(
+            f"🗑 Услуга <code>#{service_id}</code> заблокирована.\n"
+            f"Замена не найдена — лот <code>#{lot.funpay_lot_id}</code> удалён."
+        )
+    except Exception as ex:
+        logger.warning("lot deletion failed: %s", ex)
+        notify_tg(
+            f"⛔ Услуга <code>#{service_id}</code> заблокирована.\n"
+            f"Лот деактивирован, удалить не удалось."
+        )
 
 
 # =============================================================================
-# 10. STATUS POLLER / AUTO PRICE / AUTO DEACTIVATE
+# 10. DYNAMIC WORKFLOWS ENGINE
+# =============================================================================
+
+
+class DynamicWorkflows:
+    """Адаптивная система управления заказами.
+
+    Анализирует паттерны:
+    - Скорость выполнения каждой услуги
+    - Процент ошибок по услугам
+    - Повторные покупатели (лояльность)
+    - Нагрузка (сколько заказов в очереди)
+
+    На основе данных автоматически:
+    - Регулирует приоритеты услуг (быстрые - выше)
+    - Временно приостанавливает проблемные услуги (soft blacklist)
+    - Выдаёт бонусы повторным покупателям
+    - Управляет задержками между заказами (anti-flood)
+    """
+
+    def __init__(self):
+        self._service_stats: dict[int, dict] = {}  # service_id → stats
+        self._buyer_history: dict[str, dict] = {}  # buyer_username → history
+        self._soft_blacklist: dict[int, float] = {}  # service_id → unblock_ts
+        self._order_queue: list[dict] = []
+        self._last_order_ts: dict[int, float] = {}  # service_id → last order timestamp
+        self._lock = threading.RLock()
+
+    def record_order_result(self, service_id: int, success: bool, duration_sec: float = 0.0):
+        """Записывает результат заказа для аналитики."""
+        with self._lock:
+            if service_id not in self._service_stats:
+                self._service_stats[service_id] = {
+                    "total": 0, "success": 0, "failed": 0,
+                    "fail_streak": 0, "avg_duration": 0.0,
+                    "last_success_ts": 0.0, "last_fail_ts": 0.0,
+                }
+            st = self._service_stats[service_id]
+            st["total"] += 1
+            if success:
+                st["success"] += 1
+                st["fail_streak"] = 0
+                st["last_success_ts"] = time.time()
+                # Скользящее среднее длительности
+                if duration_sec > 0:
+                    old_avg = st["avg_duration"]
+                    st["avg_duration"] = old_avg * 0.7 + duration_sec * 0.3 if old_avg else duration_sec
+            else:
+                st["failed"] += 1
+                st["fail_streak"] += 1
+                st["last_fail_ts"] = time.time()
+
+    def record_buyer(self, buyer_username: str):
+        """Записывает покупку для системы лояльности."""
+        with self._lock:
+            if buyer_username not in self._buyer_history:
+                self._buyer_history[buyer_username] = {"orders": 0, "first_ts": time.time()}
+            self._buyer_history[buyer_username]["orders"] += 1
+
+    def get_buyer_order_count(self, buyer_username: str) -> int:
+        """Возвращает количество заказов покупателя."""
+        with self._lock:
+            h = self._buyer_history.get(buyer_username)
+            return h["orders"] if h else 0
+
+    def get_loyalty_bonus(self, buyer_username: str, quantity: int) -> int:
+        """Рассчитывает бонусный объём для повторного покупателя."""
+        if not CTX.storage or not CTX.storage.cfg.get("loyalty_enabled", True):
+            return 0
+        min_orders = int(CTX.storage.cfg.get("loyalty_min_orders", 2))
+        bonus_pct = float(CTX.storage.cfg.get("loyalty_bonus_pct", 5.0))
+        count = self.get_buyer_order_count(buyer_username)
+        if count >= min_orders:
+            bonus = int(quantity * bonus_pct / 100.0)
+            return max(bonus, 1) if bonus_pct > 0 else 0
+        return 0
+
+    def should_soft_block(self, service_id: int) -> bool:
+        """Проверяет, нужно ли временно заблокировать услугу (слишком много ошибок подряд)."""
+        if not CTX.storage or not CTX.storage.cfg.get("dynamic_workflows_enabled", True):
+            return False
+        limit = int(CTX.storage.cfg.get("dw_fail_streak_limit", 3))
+        with self._lock:
+            st = self._service_stats.get(service_id)
+            if not st:
+                return False
+            if st["fail_streak"] >= limit:
+                # Soft block на 30 минут
+                self._soft_blacklist[service_id] = time.time() + 1800
+                return True
+            # Проверяем текущий soft blacklist
+            unblock_ts = self._soft_blacklist.get(service_id, 0)
+            if unblock_ts > time.time():
+                return True
+            elif unblock_ts > 0:
+                # Время вышло — разблокируем
+                self._soft_blacklist.pop(service_id, None)
+            return False
+
+    def get_queue_delay(self, service_id: int) -> float:
+        """Возвращает задержку перед следующим заказом (anti-flood)."""
+        if not CTX.storage:
+            return 0.0
+        base_delay = float(CTX.storage.cfg.get("smart_queue_delay_sec", 5))
+        with self._lock:
+            last_ts = self._last_order_ts.get(service_id, 0)
+            elapsed = time.time() - last_ts
+            if elapsed < base_delay:
+                return base_delay - elapsed
+            return 0.0
+
+    def mark_order_sent(self, service_id: int):
+        """Отмечает что заказ на услугу отправлен (для anti-flood)."""
+        with self._lock:
+            self._last_order_ts[service_id] = time.time()
+
+    def get_service_health_score(self, service_id: int) -> float:
+        """Возвращает 'здоровье' услуги 0.0-1.0 (1.0 = отлично)."""
+        with self._lock:
+            st = self._service_stats.get(service_id)
+            if not st or st["total"] == 0:
+                return 1.0  # нет данных = считаем ок
+            success_rate = st["success"] / max(st["total"], 1)
+            # Штраф за текущую серию ошибок
+            streak_penalty = min(st["fail_streak"] * 0.15, 0.5)
+            # Штраф за медленность
+            slow_threshold = float(CTX.storage.cfg.get("dw_slow_threshold_sec", 3600)) if CTX.storage else 3600
+            speed_penalty = 0.0
+            if st["avg_duration"] > slow_threshold:
+                speed_penalty = min((st["avg_duration"] - slow_threshold) / slow_threshold * 0.3, 0.3)
+            score = success_rate - streak_penalty - speed_penalty
+            return max(0.0, min(1.0, score))
+
+    def get_analytics_summary(self) -> dict:
+        """Возвращает сводку аналитики для TG-меню."""
+        with self._lock:
+            total_services = len(self._service_stats)
+            total_buyers = len(self._buyer_history)
+            soft_blocked = sum(1 for ts in self._soft_blacklist.values() if ts > time.time())
+            # Топ услуг по здоровью
+            scored = [(sid, self.get_service_health_score(sid)) for sid in self._service_stats]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            top_healthy = scored[:5]
+            top_unhealthy = [x for x in scored if x[1] < 0.5][:5]
+            # Повторные покупатели
+            loyal = sum(1 for h in self._buyer_history.values()
+                       if h["orders"] >= int(CTX.storage.cfg.get("loyalty_min_orders", 2)))
+            return {
+                "total_services_tracked": total_services,
+                "total_buyers": total_buyers,
+                "soft_blocked": soft_blocked,
+                "loyal_buyers": loyal,
+                "top_healthy": top_healthy,
+                "top_unhealthy": top_unhealthy,
+            }
+
+    def reset_service_stats(self, service_id: int):
+        """Сбрасывает статистику услуги."""
+        with self._lock:
+            self._service_stats.pop(service_id, None)
+            self._soft_blacklist.pop(service_id, None)
+
+
+# Глобальный экземпляр Dynamic Workflows
+DW = DynamicWorkflows()
+
+
+# =============================================================================
+# 11. STATUS POLLER / AUTO PRICE / AUTO DEACTIVATE
 # =============================================================================
 
 
@@ -1526,8 +2329,18 @@ def status_poller_loop() -> None:
                                              smm_status_raw=status_raw,
                                              last_check_at=_now_iso())
                     CTX.storage.stats["completed"] += 1
+                    # Dynamic Workflows: записываем длительность выполнения
+                    try:
+                        from datetime import datetime as _dt
+                        created = _dt.fromisoformat(o.created_at.replace("Z", "+00:00"))
+                        now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
+                        duration = (now - created).total_seconds()
+                        DW.record_order_result(o.service_id, success=True, duration_sec=duration)
+                    except Exception:
+                        DW.record_order_result(o.service_id, success=True)
                     send_buyer_message(o.chat_id,
-                                       CTX.storage.templates["msg_order_completed"])
+                                       CTX.storage.templates["msg_order_completed"],
+                                       o.buyer_username)
                     # Ответ на отзыв шлём при событии отзыва (см. _maybe_process_review),
                     # а не здесь — иначе будет ошибка "review not yet left by buyer".
                 elif status_raw in ("canceled", "cancelled", "partial"):
@@ -1574,7 +2387,7 @@ def update_all_prices(force: bool = False) -> tuple[int, int]:
     services = {str(s.get("service")): s for s in CTX.api.services()}
     global_markup = CTX.storage.cfg.get("global_markup_pct", 55.0)
     rate = CTX.storage.cfg.get("currency_rate_rub_to_fp", 1.0)
-    min_price = CTX.storage.cfg.get("min_lot_price", 0.0)
+    min_price = CTX.storage.cfg.get("min_lot_price", 1.0)
     jump_cap = CTX.storage.cfg.get("auto_price_jump_cap_pct", 200.0) / 100.0
     for lot in list(CTX.storage.lots.values()):
         if not lot.active:
@@ -1598,7 +2411,19 @@ def update_all_prices(force: bool = False) -> tuple[int, int]:
             updated += 1
             time.sleep(1.5)  # rate limit FP
         except Exception as ex:
-            logger.warning("price update failed for lot %s: %s", lot.funpay_lot_id, ex)
+            # Если не получилось выставить — пробуем цену 1
+            logger.warning("price update failed for lot %s (price=%.6f): %s — retrying with price=1",
+                           lot.funpay_lot_id, new_price, ex)
+            try:
+                fields = CTX.cardinal.account.get_lot_fields(lot.funpay_lot_id)
+                fields.price = 1.0
+                CTX.cardinal.account.save_lot(fields)
+                lot.last_price_fp = 1.0
+                updated += 1
+                time.sleep(1.5)
+            except Exception as ex2:
+                logger.warning("price update failed for lot %s even with price=1: %s",
+                               lot.funpay_lot_id, ex2)
     if updated:
         CTX.storage.save_lots()
     return updated, total
@@ -1672,7 +2497,7 @@ def _replace_lot_inplace(lot: LotEntry, new_service: dict) -> bool:
     desc_en = _sanitize_en(desc_en, kind="desc", service=new_service)
     markup = lot.markup_pct if lot.markup_pct is not None else CTX.storage.cfg.get("global_markup_pct", 55.0)
     rate = CTX.storage.cfg.get("currency_rate_rub_to_fp", 1.0)
-    min_price = CTX.storage.cfg.get("min_lot_price", 0.0)
+    min_price = CTX.storage.cfg.get("min_lot_price", 1.0)
     price = compute_fp_price(new_service, markup_pct=markup, rate=rate, min_price=min_price)
     patch = {
         "fields[summary][ru]": title_ru[:80],
@@ -1692,8 +2517,22 @@ def _replace_lot_inplace(lot: LotEntry, new_service: dict) -> bool:
         fields.price = price
         CTX.cardinal.account.save_lot(fields)
     except Exception as ex:
-        logger.warning("replace lot %s: save_lot failed: %s", lot.funpay_lot_id, ex)
-        return False
+        # Если не получилось — пробуем цену 1
+        logger.warning("replace lot %s: save_lot failed (price=%.6f): %s — retrying with price=1",
+                       lot.funpay_lot_id, price, ex)
+        try:
+            price = 1.0
+            patch["price"] = f"{price:.4f}"
+            if hasattr(fields, "edit_fields"):
+                fields.edit_fields(patch)
+            else:
+                fields.fields.update(patch)
+            fields.price = price
+            CTX.cardinal.account.save_lot(fields)
+        except Exception as ex2:
+            logger.warning("replace lot %s: save_lot failed even with price=1: %s",
+                           lot.funpay_lot_id, ex2)
+            return False
     # Обновляем привязку в storage
     CTX.storage.unbind_lot(lot.funpay_lot_id)
     new_lot = LotEntry(
@@ -2570,6 +3409,8 @@ def main_menu_kb():
         B("🔑 API ключ", callback_data=f"{CB}:apikey"),
     )
     kb.add(B("📋 Заказы", callback_data=f"{CB}:orders:0"))
+    kb.add(B("📊 Аналитика", callback_data=f"{CB}:analytics"))
+    kb.add(B("⚙️ Настройки", callback_data=f"{CB}:settings"))
     kb.add(B("❤️ Health-check", callback_data=f"{CB}:health"))
     kb.add(B("🔄 Обновить", callback_data=f"{CB}:main"))
     return kb
@@ -2686,6 +3527,55 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
                 return
             if data == f"{CB}:health":
                 _show_health(c)
+                return
+            if data == f"{CB}:settings":
+                _show_settings_menu(c)
+                return
+            if data == f"{CB}:analytics":
+                _show_analytics(c)
+                return
+            if data == f"{CB}:dw_toggle":
+                CTX.storage.cfg["dynamic_workflows_enabled"] = not CTX.storage.cfg.get("dynamic_workflows_enabled", True)
+                CTX.storage.save_config()
+                _show_analytics(c)
+                return
+            if data == f"{CB}:loyalty_toggle":
+                CTX.storage.cfg["loyalty_enabled"] = not CTX.storage.cfg.get("loyalty_enabled", True)
+                CTX.storage.save_config()
+                _show_analytics(c)
+                return
+            if data == f"{CB}:settings_toggle_retry":
+                CTX.storage.cfg["auto_retry_on_error"] = not CTX.storage.cfg.get("auto_retry_on_error", True)
+                CTX.storage.save_config()
+                _show_settings_menu(c)
+                return
+            if data == f"{CB}:settings_reset_blacklist":
+                CTX.storage.cfg["blacklisted_services"] = []
+                CTX.storage.save_config()
+                bot.answer_callback_query(c.id, "Чёрный список сброшен!")
+                _show_settings_menu(c)
+                return
+            if data.startswith(f"{CB}:bl_remove:"):
+                # Удаление конкретного ID из чёрного списка
+                try:
+                    sid = int(data.split(":")[2])
+                    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+                    if sid in blacklist:
+                        blacklist.remove(sid)
+                        CTX.storage.cfg["blacklisted_services"] = blacklist
+                        CTX.storage.save_config()
+                        bot.answer_callback_query(c.id, f"Услуга #{sid} удалена из чёрного списка")
+                    else:
+                        bot.answer_callback_query(c.id, f"#{sid} не в списке")
+                except (ValueError, IndexError):
+                    bot.answer_callback_query(c.id, "Ошибка")
+                _show_settings_menu(c)
+                return
+            if data == f"{CB}:bl_remove_manual":
+                bot.send_message(c.message.chat.id,
+                                 "Введи ID услуги (или несколько через запятую/пробел) для удаления из чёрного списка:")
+                _set_state(c.from_user.id, kind="bl_remove_ids")
+                bot.answer_callback_query(c.id)
                 return
             if data == f"{CB}:apikey":
                 _show_apikey_menu(c)
@@ -2872,6 +3762,35 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
                 bot.reply_to(m, f"Привязано: лот #{lot_id} ↔ услуга #{service_id}")
             elif kind == "autolots_ids":
                 _run_autolots(m, m.text)
+            elif kind == "bl_remove_ids":
+                # Удаление ID из чёрного списка вручную
+                raw = m.text.strip()
+                ids_to_remove = []
+                for token in re.split(r"[,\s;]+", raw):
+                    token = token.strip()
+                    if token.isdigit():
+                        ids_to_remove.append(int(token))
+                if not ids_to_remove:
+                    bot.reply_to(m, "Не найдено ни одного числового ID. Введи числа через запятую или пробел.")
+                    return
+                blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+                removed = []
+                not_found = []
+                for sid in ids_to_remove:
+                    if sid in blacklist:
+                        blacklist.remove(sid)
+                        removed.append(str(sid))
+                    else:
+                        not_found.append(str(sid))
+                CTX.storage.cfg["blacklisted_services"] = blacklist
+                CTX.storage.save_config()
+                reply_parts = []
+                if removed:
+                    reply_parts.append(f"✅ Удалены из чёрного списка: {', '.join(removed)}")
+                if not_found:
+                    reply_parts.append(f"⚠️ Не были в списке: {', '.join(not_found)}")
+                reply_parts.append(f"Осталось в списке: {len(blacklist)} шт.")
+                bot.reply_to(m, "\n".join(reply_parts))
         except Exception as ex:
             bot.reply_to(m, f"Ошибка: {ex}")
             logger.exception("on_state_message failed")
@@ -2897,6 +3816,127 @@ def _set_state(tg_user_id: int, **kwargs):
 
 
 # --- submenus ---
+
+
+def _show_analytics(c):
+    """Показывает аналитику Dynamic Workflows."""
+    bot = CTX.cardinal.telegram.bot
+    K, B = _kbd()
+
+    dw_enabled = CTX.storage.cfg.get("dynamic_workflows_enabled", True)
+    loyalty_enabled = CTX.storage.cfg.get("loyalty_enabled", True)
+    summary = DW.get_analytics_summary()
+
+    lines = [
+        "<b>📊 Аналитика &amp; Dynamic Workflows</b>",
+        "",
+        f"<b>🧠 Dynamic Workflows:</b> {'🟢 Вкл' if dw_enabled else '🔴 Выкл'}",
+        f"<b>🎁 Лояльность:</b> {'🟢 Вкл' if loyalty_enabled else '🔴 Выкл'}"
+        f" (бонус {CTX.storage.cfg.get('loyalty_bonus_pct', 5)}%"
+        f" после {CTX.storage.cfg.get('loyalty_min_orders', 2)} заказов)",
+        "",
+        f"📈 Отслеживается услуг: <b>{summary['total_services_tracked']}</b>",
+        f"👥 Покупателей: <b>{summary['total_buyers']}</b>",
+        f"⭐ Лояльных: <b>{summary['loyal_buyers']}</b>",
+        f"⏸ Soft-block: <b>{summary['soft_blocked']}</b>",
+    ]
+
+    if summary["top_healthy"]:
+        lines.append("")
+        lines.append("<b>✅ Топ здоровых услуг:</b>")
+        for sid, score in summary["top_healthy"][:5]:
+            svc = CTX.api.find_service(sid) if CTX.api else None
+            name = (svc.get("name", "")[:25] if svc else f"#{sid}")
+            bar = "█" * int(score * 10) + "░" * (10 - int(score * 10))
+            lines.append(f"  {bar} {score:.0%} — {html_escape(name)}")
+
+    if summary["top_unhealthy"]:
+        lines.append("")
+        lines.append("<b>⚠️ Проблемные услуги:</b>")
+        for sid, score in summary["top_unhealthy"][:5]:
+            svc = CTX.api.find_service(sid) if CTX.api else None
+            name = (svc.get("name", "")[:25] if svc else f"#{sid}")
+            bar = "█" * int(score * 10) + "░" * (10 - int(score * 10))
+            lines.append(f"  {bar} {score:.0%} — {html_escape(name)}")
+
+    # Общая статистика из storage
+    lines.append("")
+    lines.append("<b>📦 Общая статистика:</b>")
+    stats = CTX.storage.stats
+    lines.append(f"  Отправлено: <b>{stats.get('sent', 0)}</b>")
+    lines.append(f"  Выполнено: <b>{stats.get('completed', 0)}</b>")
+    lines.append(f"  Ошибок: <b>{stats.get('failed', 0)}</b>")
+    total = stats.get('sent', 0)
+    if total > 0:
+        success_rate = stats.get('completed', 0) / total * 100
+        lines.append(f"  Успешность: <b>{success_rate:.1f}%</b>")
+
+    kb = K(row_width=2)
+    kb.add(
+        B(("🟢" if dw_enabled else "🔴") + " DW", callback_data=f"{CB}:dw_toggle"),
+        B(("🟢" if loyalty_enabled else "🔴") + " Лояльность", callback_data=f"{CB}:loyalty_toggle"),
+    )
+    kb.add(B("◀️ Меню", callback_data=f"{CB}:main"))
+
+    bot.edit_message_text("\n".join(lines), c.message.chat.id, c.message.id,
+                          reply_markup=kb, parse_mode="HTML")
+    bot.answer_callback_query(c.id)
+
+
+def _show_settings_menu(c):
+    """Показывает меню настроек плагина."""
+    bot = CTX.cardinal.telegram.bot
+    K, B = _kbd()
+
+    retry_enabled = CTX.storage.cfg.get("auto_retry_on_error", True)
+    blacklist = CTX.storage.cfg.get("blacklisted_services", [])
+    max_attempts = CTX.storage.cfg.get("auto_retry_max_attempts", 2)
+
+    lines = [
+        "<b>⚙️ Настройки</b>",
+        "",
+        f"<b>🔄 Авто-повтор при ошибке:</b> {'🟢 Вкл' if retry_enabled else '🔴 Выкл'}",
+        f"   Попыток: {max_attempts}",
+        "",
+        f"<b>🚫 Чёрный список услуг:</b> {len(blacklist)} шт.",
+    ]
+    if blacklist:
+        lines.append("   Нажми на ID чтобы убрать из списка:")
+        for sid in blacklist[:20]:
+            svc = CTX.api.find_service(sid) if CTX.api else None
+            name = (svc.get("name", "")[:30] if svc else "неизвестна")
+            lines.append(f"   • <code>{sid}</code> — {html_escape(name)}")
+        if len(blacklist) > 20:
+            lines.append(f"   ... и ещё {len(blacklist) - 20}")
+    lines.append("")
+    lines.append("<i>При ошибке заказа бот проверяет ссылку и баланс, "
+                 "пробует ещё раз. Если повторно ошибка — возврат денег, "
+                 "блокировка услуги и замена лота.</i>")
+    lines.append("")
+    lines.append("<i>Чтобы удалить конкретный ID — нажми кнопку ниже "
+                 "или отправь команду «Удалить ID» и введи номер.</i>")
+
+    kb = K(row_width=1)
+    kb.add(
+        B(("🟢" if retry_enabled else "🔴") + " Авто-повтор", callback_data=f"{CB}:settings_toggle_retry"),
+    )
+    # Кнопки для удаления отдельных услуг из чёрного списка (показываем до 10)
+    if blacklist:
+        row = []
+        for sid in blacklist[:10]:
+            row.append(B(f"❌ {sid}", callback_data=f"{CB}:bl_remove:{sid}"))
+            if len(row) == 3:
+                kb.row(*row)
+                row = []
+        if row:
+            kb.row(*row)
+        kb.add(B(f"🗑 Сбросить весь список ({len(blacklist)})", callback_data=f"{CB}:settings_reset_blacklist"))
+    kb.add(B("✏️ Удалить ID вручную", callback_data=f"{CB}:bl_remove_manual"))
+    kb.add(B("◀️ Меню", callback_data=f"{CB}:main"))
+
+    bot.edit_message_text("\n".join(lines), c.message.chat.id, c.message.id,
+                          reply_markup=kb, parse_mode="HTML")
+    bot.answer_callback_query(c.id)
 
 
 def _show_health(c):
@@ -3192,7 +4232,7 @@ def _run_autolots_body(m, text: str):
         return
     markup = CTX.storage.cfg.get("global_markup_pct", 55.0)
     rate = CTX.storage.cfg.get("currency_rate_rub_to_fp", 1.0)
-    min_price = CTX.storage.cfg.get("min_lot_price", 0.0)
+    min_price = CTX.storage.cfg.get("min_lot_price", 1.0)
     try:
         services_map = {str(s.get("service")): s for s in CTX.api.services()}
     except Exception as ex:
