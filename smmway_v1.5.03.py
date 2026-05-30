@@ -26,6 +26,7 @@ import re
 import string
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Iterable
@@ -82,6 +83,7 @@ ORDERS_FILE = os.path.join(PLUGIN_DIR, "orders.json")
 CONFIG_FILE = os.path.join(PLUGIN_DIR, "config.json")
 TEMPLATES_FILE = os.path.join(PLUGIN_DIR, "templates.json")
 SERVICE_CACHE_FILE = os.path.join(PLUGIN_DIR, "services_cache.json")
+RECOVERY_STATE_FILE = os.path.join(PLUGIN_DIR, "recovery_state.json")
 LOG_FILE = os.path.join(PLUGIN_DIR, "smmway.log")
 
 
@@ -2143,11 +2145,12 @@ class DynamicWorkflows:
     """
 
     def __init__(self):
-        self._service_stats: dict[int, dict] = {}  # service_id → stats
-        self._buyer_history: dict[str, dict] = {}  # buyer_username → history
-        self._soft_blacklist: dict[int, float] = {}  # service_id → unblock_ts
+        self._service_stats: dict[int, dict] = {}  # service_id -> stats
+        self._buyer_history: dict[str, dict] = {}  # buyer_username -> history
+        self._soft_blacklist: dict[int, float] = {}  # service_id -> unblock_ts
         self._order_queue: list[dict] = []
-        self._last_order_ts: dict[int, float] = {}  # service_id → last order timestamp
+        self._last_order_ts: dict[int, float] = {}  # service_id -> last order timestamp
+        self._recent_results: dict[int, deque] = {}  # service_id -> deque of (success: bool, duration: float)
         self._lock = threading.RLock()
 
     def record_order_result(self, service_id: int, success: bool, duration_sec: float = 0.0):
@@ -2173,6 +2176,17 @@ class DynamicWorkflows:
                 st["failed"] += 1
                 st["fail_streak"] += 1
                 st["last_fail_ts"] = time.time()
+            # Sliding window of recent results
+            window_size = int(CTX.storage.cfg.get("service_recovery_window_orders", 20)) if CTX.storage else 20
+            if service_id not in self._recent_results:
+                self._recent_results[service_id] = deque(maxlen=window_size)
+            else:
+                # Update maxlen if config changed
+                current_dq = self._recent_results[service_id]
+                if current_dq.maxlen != window_size:
+                    new_dq = deque(current_dq, maxlen=window_size)
+                    self._recent_results[service_id] = new_dq
+            self._recent_results[service_id].append((success, duration_sec))
 
     def record_buyer(self, buyer_username: str):
         """Записывает покупку для системы лояльности."""
@@ -2244,7 +2258,13 @@ class DynamicWorkflows:
             st = self._service_stats.get(service_id)
             if not st or st["total"] == 0:
                 return 1.0  # нет данных = считаем ок
-            success_rate = st["success"] / max(st["total"], 1)
+            # Use sliding window of recent results if available
+            recent = self._recent_results.get(service_id)
+            if recent and len(recent) > 0:
+                window_success = sum(1 for s, _ in recent if s)
+                success_rate = window_success / len(recent)
+            else:
+                success_rate = st["success"] / max(st["total"], 1)
             # Штраф за текущую серию ошибок
             streak_penalty = min(st["fail_streak"] * 0.15, 0.5)
             # Штраф за медленность
@@ -2283,6 +2303,7 @@ class DynamicWorkflows:
         with self._lock:
             self._service_stats.pop(service_id, None)
             self._soft_blacklist.pop(service_id, None)
+            self._recent_results.pop(service_id, None)
 
 
 # Глобальный экземпляр Dynamic Workflows
@@ -2290,6 +2311,28 @@ DW = DynamicWorkflows()
 
 # Трекинг услуг в процессе авто-восстановления: service_id -> timestamp начала
 _recovering_services: dict[int, float] = {}
+
+
+def _save_recovery_state() -> None:
+    """Persist _recovering_services to disk."""
+    try:
+        with open(RECOVERY_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({str(k): v for k, v in _recovering_services.items()}, f)
+    except Exception:
+        logger.debug("failed to save recovery state")
+
+
+def _load_recovery_state() -> None:
+    """Load _recovering_services from disk on startup."""
+    global _recovering_services
+    try:
+        if os.path.exists(RECOVERY_STATE_FILE):
+            with open(RECOVERY_STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _recovering_services = {int(k): float(v) for k, v in data.items()}
+    except Exception:
+        logger.debug("failed to load recovery state, starting fresh")
+        _recovering_services = {}
 
 
 # =============================================================================
@@ -2575,6 +2618,9 @@ def auto_deactivate_loop() -> None:
                                 lot.funpay_lot_id,
                             )
                 if target_active != lot.active:
+                    # Skip reactivation if service is in recovery cooldown
+                    if target_active and lot.service_id in _recovering_services:
+                        continue
                     try:
                         fields = CTX.cardinal.account.get_lot_fields(lot.funpay_lot_id)
                         fields.active = target_active
@@ -2624,6 +2670,7 @@ def service_recovery_loop() -> None:
                         CTX.cardinal.account.save_lot(fields)
                         lot.active = False
                         _recovering_services[lot.service_id] = now
+                        _save_recovery_state()
                         notify_tg(
                             f"🛡 <b>Стабилизатор:</b> услуга <code>#{lot.service_id}</code> "
                             f"приостановлена (здоровье {score:.0%} < {min_rate:.0%}). "
@@ -2645,6 +2692,7 @@ def service_recovery_loop() -> None:
                         break
                 if lot is None:
                     _recovering_services.pop(sid, None)
+                    _save_recovery_state()
                     continue
                 try:
                     fields = CTX.cardinal.account.get_lot_fields(lot.funpay_lot_id)
@@ -2655,6 +2703,7 @@ def service_recovery_loop() -> None:
                     lot.active = True
                     DW.reset_service_stats(sid)
                     _recovering_services.pop(sid, None)
+                    _save_recovery_state()
                     notify_tg(
                         f"🛡 <b>Стабилизатор:</b> услуга <code>#{sid}</code> "
                         f"восстановлена и снова активна ✅"
@@ -2663,6 +2712,7 @@ def service_recovery_loop() -> None:
                 except Exception as ex:
                     logger.warning("recovery: failed to re-enable lot %s: %s", lot.funpay_lot_id, ex)
                     _recovering_services.pop(sid, None)
+                    _save_recovery_state()
         except Exception:
             logger.exception("service recovery loop iteration failed")
 
@@ -3792,6 +3842,11 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
             kind = st["kind"]
             if kind == "set_cfg":
                 value = st["cast"](m.text)
+                # Bounds validation for recovery settings
+                if st["key"] == "service_recovery_min_success_rate":
+                    value = max(0.0, min(1.0, float(value)))
+                elif st["key"] == "service_recovery_cooldown_sec":
+                    value = max(60, int(value))
                 CTX.storage.cfg[st["key"]] = value
                 CTX.storage.save_config()
                 bot.reply_to(m, f"Сохранено: <code>{st['key']}</code> = <code>{value}</code>",
@@ -4771,6 +4826,8 @@ def init_plugin(crd: "Cardinal", *args) -> None:
         _ensure_plugin_dir()
     except Exception:
         pass
+    # Load persisted recovery state
+    _load_recovery_state()
     # File logging (may fail if no write permission — not critical)
     try:
         fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
