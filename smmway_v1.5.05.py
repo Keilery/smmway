@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 # =============================================================================
 
 NAME = "SMMWay"
-VERSION = "1.5.04"
+VERSION = "1.5.05"
 DESCRIPTION = (
     "Автоматическая перепродажа услуг накрутки через FunPay Cardinal.\n"
     "• Dynamic Workflows — адаптивное управление заказами.\n"
@@ -3662,13 +3662,11 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
                 CTX.storage.save_config()
                 _show_update_menu(c)
                 return
-            if data == f"{CB}:update_check":
-                result = check_github_update(force=True)
-                if result:
-                    bot.answer_callback_query(c.id, f"Найдено обновление: v{result[0]}")
-                else:
-                    bot.answer_callback_query(c.id, "Обновлений не найдено")
-                _show_update_menu(c)
+            if data == f"{CB}:update_interval_set":
+                _ask_value(c, "auto_update_interval_sec",
+                           "Введи интервал проверки обновлений в секундах.\n"
+                           "Например: <code>3600</code> = 1 час, <code>7200</code> = 2 часа, <code>900</code> = 15 мин",
+                           cast=int)
                 return
             if data == f"{CB}:update_apply":
                 result = check_github_update()
@@ -4984,6 +4982,7 @@ def _show_update_menu(c):
     K, B = _kbd()
     bot = CTX.cardinal.telegram.bot
     enabled = CTX.storage.cfg.get("auto_update_enabled", True)
+    interval = CTX.storage.cfg.get("auto_update_interval_sec", 3600)
     try:
         result = check_github_update()
     except Exception:
@@ -4994,18 +4993,24 @@ def _show_update_menu(c):
     else:
         latest_ver = None
         status_text = "\u2705 \u0423\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0430 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u044f\u044f \u0432\u0435\u0440\u0441\u0438\u044f"
+    # Format interval for display
+    if interval >= 3600:
+        interval_text = f"{interval // 3600} \u0447"
+    elif interval >= 60:
+        interval_text = f"{interval // 60} \u043c\u0438\u043d"
+    else:
+        interval_text = f"{interval} \u0441\u0435\u043a"
     text = (
         f"<b>\U0001f4e5 \u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f SMMWay</b>\n\n"
         f"\u0422\u0435\u043a\u0443\u0449\u0430\u044f \u0432\u0435\u0440\u0441\u0438\u044f: <code>{VERSION}</code>\n"
         f"{status_text}\n\n"
         f"\u0410\u0432\u0442\u043e-\u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0435: {'\U0001f7e2 \u0412\u043a\u043b' if enabled else '\U0001f534 \u0412\u044b\u043a\u043b'}\n"
-        f"\u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b: {CTX.storage.cfg.get('auto_update_interval_sec', 3600)} \u0441\u0435\u043a"
+        f"\u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438: <b>{interval_text}</b>"
     )
     kb = K(row_width=1)
     kb.add(B(("\U0001f7e2" if enabled else "\U0001f534") + " \u0410\u0432\u0442\u043e-\u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0435",
              callback_data=f"{CB}:update_toggle"))
-    kb.add(B("\U0001f50d \u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f",
-             callback_data=f"{CB}:update_check"))
+    kb.add(B(f"\u23f0 \u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b ({interval_text})", callback_data=f"{CB}:update_interval_set"))
     if latest_ver:
         kb.add(B(f"\u2b06\ufe0f \u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c \u0434\u043e {latest_ver}",
                  callback_data=f"{CB}:update_apply"))
