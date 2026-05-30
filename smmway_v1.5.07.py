@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 # =============================================================================
 
 NAME = "SMMWay"
-VERSION = "1.5.06"
+VERSION = "1.5.07"
 DESCRIPTION = (
     "Автоматическая перепродажа услуг накрутки через FunPay Cardinal.\n"
     "• Dynamic Workflows — адаптивное управление заказами.\n"
@@ -4896,6 +4896,7 @@ def check_github_update(force: bool = False):
         files = resp.json()
         pattern = re.compile(r"^smmway_v([\d.]+)\.py$")
         best_version = None
+        best_version_str = None
         best_url = None
         for f in files:
             if not isinstance(f, dict):
@@ -4908,6 +4909,7 @@ def check_github_update(force: bool = False):
                     ver_tuple = _parse_version(ver_str)
                     if best_version is None or ver_tuple > best_version:
                         best_version = ver_tuple
+                        best_version_str = ver_str
                         best_url = f.get("download_url", "")
                 except (ValueError, TypeError):
                     continue
@@ -4917,8 +4919,7 @@ def check_github_update(force: bool = False):
             return None
         current = _parse_version(VERSION)
         if best_version > current:
-            latest_str = ".".join(str(x) for x in best_version)
-            result = (latest_str, best_url)
+            result = (best_version_str, best_url)
             _update_cache["result"] = result
             _update_cache["checked_at"] = time.time()
             return result
@@ -4960,9 +4961,15 @@ def perform_update(download_url: str, new_version: str) -> bool:
 
 def auto_update_loop() -> None:
     """Background loop that periodically checks for plugin updates on GitHub."""
+    _first_run = True
     while CTX.is_running():
         try:
-            time.sleep(max(60, CTX.storage.cfg.get("auto_update_interval_sec", 3600)))
+            if _first_run:
+                # Short delay on first run to let plugin fully initialize
+                time.sleep(30)
+                _first_run = False
+            else:
+                time.sleep(max(60, CTX.storage.cfg.get("auto_update_interval_sec", 3600)))
             if not CTX.storage.cfg.get("auto_update_enabled", True):
                 continue
             result = check_github_update(force=True)
