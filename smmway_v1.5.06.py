@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 # =============================================================================
 
 NAME = "SMMWay"
-VERSION = "1.5.05"
+VERSION = "1.5.06"
 DESCRIPTION = (
     "Автоматическая перепродажа услуг накрутки через FunPay Cardinal.\n"
     "• Dynamic Workflows — адаптивное управление заказами.\n"
@@ -388,8 +388,7 @@ DEFAULT_CONFIG = {
     "auto_review_bonus_pct": 10.0,
     "notify_order_created": True,
     "notify_order_error": True,
-    "notify_balance_before": False,
-    "notify_balance_after": True,
+
     "status_poll_interval_sec": 90,
     "max_buyer_link_wait_sec": 1800,
     # Минимальная цена лота. Формула: (цена за 1 ед.) * (наценка%/100) + цена за 1 ед.
@@ -1350,12 +1349,7 @@ def on_new_order(c: "Cardinal", e: "NewOrderEvent", *args) -> None:
             CTX.buyer_state.set_awaiting_link(
                 chat_id, order.id, lot, entry.quantity, chat_id
             )
-        if CTX.storage.cfg.get("notify_balance_before"):
-            try:
-                bal = CTX.api.balance()
-                notify_tg(f"💰 SMMWay баланс до создания заказа: <code>{bal:.4f}</code> ₽")
-            except Exception:
-                pass
+
         logger.info("new order %s: chat_id=%s, buyer_id=%s, buyer=%s, service=%s",
                     order.id, chat_id, buyer_id, buyer_username, lot.service_id)
     except Exception:
@@ -1777,55 +1771,56 @@ def _format_order_started_notification(
     smmway_charge_rub: float,
     service_name: str,
     buyer_username: str,
+    balance_before: float | None = None,
+    balance_after: float | None = None,
 ) -> str:
-    """Красивое HTML-уведомление о запуске заказа в Telegram.
-
-    Содержит всё, что просил юзер: сколько заплатил покупатель на FunPay,
-    сколько мы платим smmway, чистая прибыль (₽ и %), ссылка для накрутки,
-    SMM-id, FP-id, объём, услуга, ник покупателя.
-    """
+    """Красивое HTML-уведомление о запуске заказа в Telegram (всё в 1 сообщении)."""
     profit = funpay_price - smmway_charge_rub
     profit_pct = (profit / funpay_price * 100.0) if funpay_price > 0 else 0.0
-    margin_emoji = "💎" if profit_pct >= 50 else ("✨" if profit_pct >= 20 else "📈" if profit > 0 else "⚠️")
     profit_sign = "+" if profit >= 0 else "−"
     profit_abs = abs(profit)
-    # Имя услуги: максимум ~60 символов, чтобы не растягивать сообщение.
+    # Имя услуги: максимум ~60 символов
     short_service = (service_name or "—").strip()
     if len(short_service) > 60:
         short_service = short_service[:57] + "…"
-    # Ссылку отдаём как кликабельную, но текст обрезаем для аккуратности.
+    # Ссылка
     link_html = html_escape(link or "—")
     if link and len(link) > 60:
         link_label = html_escape(link[:57] + "…")
     else:
         link_label = link_html
     buyer = html_escape(buyer_username or "—") if buyer_username else "—"
-    return (
+    # Build the message
+    msg = (
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🚀 <b>Запуск заказа</b>\n"
+        "→ <b>Запуск заказа</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 <b>Покупатель:</b> <code>{buyer}</code>\n"
-        f"🧾 <b>FunPay-заказ:</b> <a href=\"https://funpay.com/orders/{html_escape(funpay_order_id)}/\">"
+        f"👤 Покупатель: <code>{buyer}</code>\n"
+        f"🧾 FunPay-заказ: <a href=\"https://funpay.com/orders/{html_escape(funpay_order_id)}/\">"
         f"#{html_escape(funpay_order_id)}</a>\n"
-        f"🛒 <b>Услуга:</b> {html_escape(short_service)} <i>(#{lot.service_id})</i>\n"
-        f"📦 <b>Лот FP:</b> <code>#{lot.funpay_lot_id}</code>\n"
-        f"🔢 <b>Объём:</b> <code>{quantity}</code> шт.\n"
+        f"🛒 Услуга: {html_escape(short_service)} <i>(#{lot.service_id})</i>\n"
+        f"📦 Лот FP: <code>#{lot.funpay_lot_id}</code>\n"
+        f"🔢 Объём: <code>{quantity}</code> шт.\n"
         "\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "💰 <b>Финансы</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"💵 На FunPay заплатили: <code>{funpay_price:.2f} ₽</code>\n"
-        f"💸 Нам на smmway:        <code>{smmway_charge_rub:.4f} ₽</code>\n"
-        f"{margin_emoji} <b>Чистая прибыль:</b> "
-        f"<code>{profit_sign}{profit_abs:.4f} ₽</code> "
+        f"💸 Нам на smmway: <code>{smmway_charge_rub:.4f} ₽</code>\n"
+        f"· Чистая прибыль: <code>{profit_sign}{profit_abs:.4f} ₽</code> "
         f"<i>({profit_sign}{abs(profit_pct):.1f}%)</i>\n"
         "\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🤖 <b>Запуск бота</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🆔 <b>SMMWay-заказ:</b> <code>#{smm_id}</code>\n"
-        f"🔗 <b>Цель:</b> <a href=\"{link_html}\">{link_label}</a>\n"
+        f"🆔 SMMWay-заказ: <code>#{smm_id}</code>\n"
+        f"🔗 Цель: <a href=\"{link_html}\">{link_label}</a>\n"
     )
+    if balance_before is not None:
+        msg += f"💰 SMMWay баланс до создания заказа: <code>{balance_before:.4f} ₽</code>\n"
+    if balance_after is not None:
+        msg += f"💰 SMMWay баланс после создания: <code>{balance_after:.4f} ₽</code>\n"
+    return msg
 
 
 # Категории услуг, которые требуют дополнительных параметров при заказе.
@@ -1902,7 +1897,19 @@ def _process_smm_order(state: dict, link: str) -> None:
         extra = _build_extra_params(service, link, actual_quantity) if service else None
         # Отмечаем отправку (anti-flood)
         DW.mark_order_sent(lot.service_id)
+        # Capture balance before order
+        _bal_before = None
+        try:
+            _bal_before = CTX.api.balance()
+        except Exception:
+            pass
         smm_id = CTX.api.add_order(lot.service_id, link, actual_quantity, extra=extra)
+        # Capture balance after order
+        _bal_after = None
+        try:
+            _bal_after = CTX.api.balance()
+        except Exception:
+            pass
         # Записываем успех в DW
         DW.record_order_result(lot.service_id, success=True)
         CTX.storage.update_order(
@@ -1961,13 +1968,10 @@ def _process_smm_order(state: dict, link: str) -> None:
                 smmway_charge_rub=smmway_charge,
                 service_name=service_name,
                 buyer_username=buyer_username,
+                balance_before=_bal_before,
+                balance_after=_bal_after,
             ))
-        if CTX.storage.cfg.get("notify_balance_after"):
-            try:
-                bal = CTX.api.balance()
-                notify_tg(f"💰 SMMWay баланс после создания: <code>{bal:.4f}</code> ₽")
-            except Exception:
-                pass
+
     except SMMWayError as ex:
         # --- Dynamic Workflows: записываем неудачу ---
         DW.record_order_result(lot.service_id, success=False)
@@ -4748,8 +4752,7 @@ def _show_notif_menu(c):
     keys = [
         ("notify_order_created", "О создании заказа"),
         ("notify_order_error", "Об ошибке создания"),
-        ("notify_balance_before", "Баланс до"),
-        ("notify_balance_after", "Баланс после"),
+
     ]
     text = "<b>🔔 Уведомления в Telegram</b>"
     kb = K(row_width=1)
