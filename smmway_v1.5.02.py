@@ -3698,6 +3698,7 @@ def init_tg_menu(crd: "Cardinal", *args) -> None:
                 _show_update_menu(c)
                 return
             if data == f"{CB}:update_check":
+                check_github_update(force=True)
                 _show_update_menu(c)
                 return
             if data == f"{CB}:update_apply":
@@ -4695,17 +4696,23 @@ def _show_order_card(c, order_id: str):
 # 13. GITHUB AUTO-UPDATE
 # =============================================================================
 
+_update_cache: dict = {"result": None, "checked_at": 0.0}
+
 
 def _parse_version(v: str) -> tuple:
     """Parse version string like '1.5.02' into a comparable tuple of ints."""
     return tuple(int(x) for x in v.strip().split("."))
 
 
-def check_github_update():
+def check_github_update(force: bool = False):
     """Check GitHub repo for a newer version of the plugin.
 
     Returns (latest_version, download_url) or None.
+    Uses a 5-minute cache to avoid hitting GitHub API rate limits.
+    Pass force=True to bypass the cache.
     """
+    if not force and time.time() - _update_cache["checked_at"] < 300:
+        return _update_cache["result"]
     try:
         repo = CTX.storage.cfg.get("github_repo", "Keilery/smmway") if CTX.storage else "Keilery/smmway"
         url = f"https://api.github.com/repos/{repo}/contents/"
@@ -4714,8 +4721,7 @@ def check_github_update():
             logger.warning("GitHub API returned %s", resp.status_code)
             return None
         files = resp.json()
-        import re as _re
-        pattern = _re.compile(r"^smmway_v([\d.]+)\.py$")
+        pattern = re.compile(r"^smmway_v([\d.]+)\.py$")
         best_version = None
         best_url = None
         for f in files:
@@ -4733,11 +4739,18 @@ def check_github_update():
                 except (ValueError, TypeError):
                     continue
         if best_version is None:
+            _update_cache["result"] = None
+            _update_cache["checked_at"] = time.time()
             return None
         current = _parse_version(VERSION)
         if best_version > current:
             latest_str = ".".join(str(x) for x in best_version)
-            return (latest_str, best_url)
+            result = (latest_str, best_url)
+            _update_cache["result"] = result
+            _update_cache["checked_at"] = time.time()
+            return result
+        _update_cache["result"] = None
+        _update_cache["checked_at"] = time.time()
         return None
     except Exception as ex:
         logger.exception("check_github_update error: %s", ex)
@@ -4779,7 +4792,7 @@ def auto_update_loop() -> None:
             time.sleep(max(60, CTX.storage.cfg.get("auto_update_interval_sec", 3600)))
             if not CTX.storage.cfg.get("auto_update_enabled", True):
                 continue
-            result = check_github_update()
+            result = check_github_update(force=True)
             if result:
                 new_version, download_url = result
                 perform_update(download_url, new_version)
