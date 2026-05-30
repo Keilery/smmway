@@ -2311,10 +2311,11 @@ DW = DynamicWorkflows()
 
 # Трекинг услуг в процессе авто-восстановления: service_id -> timestamp начала
 _recovering_services: dict[int, float] = {}
+_recovery_lock = threading.Lock()
 
 
 def _save_recovery_state() -> None:
-    """Persist _recovering_services to disk."""
+    """Persist _recovering_services to disk. Caller must hold _recovery_lock."""
     try:
         with open(RECOVERY_STATE_FILE, "w", encoding="utf-8") as f:
             json.dump({str(k): v for k, v in _recovering_services.items()}, f)
@@ -2325,14 +2326,15 @@ def _save_recovery_state() -> None:
 def _load_recovery_state() -> None:
     """Load _recovering_services from disk on startup."""
     global _recovering_services
-    try:
-        if os.path.exists(RECOVERY_STATE_FILE):
-            with open(RECOVERY_STATE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            _recovering_services = {int(k): float(v) for k, v in data.items()}
-    except Exception:
-        logger.debug("failed to load recovery state, starting fresh")
-        _recovering_services = {}
+    with _recovery_lock:
+        try:
+            if os.path.exists(RECOVERY_STATE_FILE):
+                with open(RECOVERY_STATE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                _recovering_services = {int(k): float(v) for k, v in data.items()}
+        except Exception:
+            logger.debug("failed to load recovery state, starting fresh")
+            _recovering_services = {}
 
 
 # =============================================================================
@@ -2619,8 +2621,10 @@ def auto_deactivate_loop() -> None:
                             )
                 if target_active != lot.active:
                     # Skip reactivation if service is in recovery cooldown
-                    if target_active and lot.service_id in _recovering_services:
-                        continue
+                    if target_active:
+                        with _recovery_lock:
+                            if lot.service_id in _recovering_services:
+                                continue
                     try:
                         fields = CTX.cardinal.account.get_lot_fields(lot.funpay_lot_id)
                         fields.active = target_active
@@ -2658,8 +2662,9 @@ def service_recovery_loop() -> None:
             for lot in list(CTX.storage.lots.values()):
                 if not lot.active:
                     continue
-                if lot.service_id in _recovering_services:
-                    continue
+                with _recovery_lock:
+                    if lot.service_id in _recovering_services:
+                        continue
                 score = DW.get_service_health_score(lot.service_id)
                 if score < min_rate:
                     try:
@@ -2669,8 +2674,9 @@ def service_recovery_loop() -> None:
                             fields.edit_fields({"active": ""})
                         CTX.cardinal.account.save_lot(fields)
                         lot.active = False
-                        _recovering_services[lot.service_id] = now
-                        _save_recovery_state()
+                        with _recovery_lock:
+                            _recovering_services[lot.service_id] = now
+                            _save_recovery_state()
                         notify_tg(
                             f"🛡 <b>Стабилизатор:</b> услуга <code>#{lot.service_id}</code> "
                             f"приостановлена (здоровье {score:.0%} < {min_rate:.0%}). "
@@ -2683,7 +2689,8 @@ def service_recovery_loop() -> None:
             # Phase 2: Check recovering services for cooldown expiry
             if not CTX.storage.cfg.get("service_recovery_auto_reenable", True):
                 continue
-            expired = [sid for sid, ts in _recovering_services.items() if now - ts >= cooldown]
+            with _recovery_lock:
+                expired = [sid for sid, ts in _recovering_services.items() if now - ts >= cooldown]
             for sid in expired:
                 lot = None
                 for l in CTX.storage.lots.values():
@@ -2691,8 +2698,9 @@ def service_recovery_loop() -> None:
                         lot = l
                         break
                 if lot is None:
-                    _recovering_services.pop(sid, None)
-                    _save_recovery_state()
+                    with _recovery_lock:
+                        _recovering_services.pop(sid, None)
+                        _save_recovery_state()
                     continue
                 try:
                     fields = CTX.cardinal.account.get_lot_fields(lot.funpay_lot_id)
@@ -2702,8 +2710,9 @@ def service_recovery_loop() -> None:
                     CTX.cardinal.account.save_lot(fields)
                     lot.active = True
                     DW.reset_service_stats(sid)
-                    _recovering_services.pop(sid, None)
-                    _save_recovery_state()
+                    with _recovery_lock:
+                        _recovering_services.pop(sid, None)
+                        _save_recovery_state()
                     notify_tg(
                         f"🛡 <b>Стабилизатор:</b> услуга <code>#{sid}</code> "
                         f"восстановлена и снова активна ✅"
@@ -2711,8 +2720,11 @@ def service_recovery_loop() -> None:
                     logger.info("recovery: re-enabled service %s after cooldown", sid)
                 except Exception as ex:
                     logger.warning("recovery: failed to re-enable lot %s: %s", lot.funpay_lot_id, ex)
-                    _recovering_services.pop(sid, None)
-                    _save_recovery_state()
+                    notify_tg(
+                        f"⚠️ <b>Стабилизатор:</b> не удалось включить услугу "
+                        f"<code>#{sid}</code> (лот {lot.funpay_lot_id}): {ex}. "
+                        f"Повторная попытка на следующей итерации."
+                    )
         except Exception:
             logger.exception("service recovery loop iteration failed")
 
@@ -4086,7 +4098,9 @@ def _show_recovery_menu(c):
     on = cfg.get("service_recovery_enabled", True)
     threshold = float(cfg.get("service_recovery_min_success_rate", 0.6))
     cooldown = int(cfg.get("service_recovery_cooldown_sec", 1800))
-    recovering_count = len(_recovering_services)
+    with _recovery_lock:
+        recovering_count = len(_recovering_services)
+        recovering_snapshot = list(_recovering_services.items())
     lines = [
         "<b>🛡 Стабилизатор продаж</b>",
         "",
@@ -4095,9 +4109,9 @@ def _show_recovery_menu(c):
         f"Кулдаун: <b>{cooldown // 60}</b> мин",
         f"Сейчас на восстановлении: <b>{recovering_count}</b>",
     ]
-    if _recovering_services:
+    if recovering_snapshot:
         now = time.time()
-        for sid, ts in list(_recovering_services.items()):
+        for sid, ts in recovering_snapshot:
             remaining = max(0, cooldown - (now - ts))
             lines.append(f"  • #{sid} — осталось {int(remaining // 60)} мин")
     kb = K(row_width=1)
