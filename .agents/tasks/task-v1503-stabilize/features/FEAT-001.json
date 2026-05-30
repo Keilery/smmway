@@ -2,7 +2,7 @@
   "id": "FEAT-001",
   "type": "feat",
   "description": "Create smmway_v1.5.03.py from v1.5.02, remove auto-review-reply feature, add Service Health Auto-Recovery (sales stabilization), bump version, update Telegram UI",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "Copy smmway_v1.5.02.py to smmway_v1.5.03.py in /projects/sandbox/smmway/",
     "Update VERSION constant from '1.5.02' to '1.5.03' (line 48)",
@@ -46,5 +46,5 @@
     "grep -c 'service_recovery_enabled' /projects/sandbox/smmway/smmway_v1.5.03.py should be >= 2"
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "DW.reset_service_stats already existed in v1.5.02 so no new method was needed. The existing method pops the service from _service_stats entirely rather than resetting to zeroes, which is fine for recovery purposes. All verification checks pass cleanly."
 }
