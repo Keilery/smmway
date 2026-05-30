@@ -1,0 +1,8 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Сохраняем БД на хосте, чтобы история не терялась при пересборке.
+      - ./data:/app/data
