@@ -46,5 +46,5 @@
     "grep -c 'service_recovery_enabled' /projects/sandbox/smmway/smmway_v1.5.03.py should be >= 2"
   ],
   "blocked_reason": null,
-  "findings": "DW.reset_service_stats already existed in v1.5.02 so no new method was needed. The existing method pops the service from _service_stats entirely rather than resetting to zeroes, which is fine for recovery purposes. All verification checks pass cleanly."
+  "findings": "DW.reset_service_stats already existed in v1.5.02 so no new method was needed. The existing method pops the service from _service_stats entirely rather than resetting to zeroes, which is fine for recovery purposes. All verification checks pass cleanly. Review fixes applied: (1) recovery state persisted to RECOVERY_STATE_FILE, loaded on init_plugin; (2) sliding-window scoring implemented via deque in _recent_results, sized by service_recovery_window_orders; (3) bounds validation added in on_state_message for threshold [0.0,1.0] and cooldown min 60; (4) race guard added in auto_deactivate_loop to skip reactivation for recovering services; (5) get_service_health_score uses windowed success_rate when available."
 }
